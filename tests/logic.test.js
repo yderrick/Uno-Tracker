@@ -57,11 +57,11 @@ test('streaks count consecutive round wins', () => {
   assert.equal(L.roundsSinceWin(g, 'a'), 3);
 });
 
-test('commentary returns 1–3 lines with names filled in', () => {
+test('commentary returns 1–4 lines with names filled in', () => {
   const g = game('high', 300, [{ a: 120, b: 0, c: 10 }, { a: 5, b: 90, c: 0 }, { a: 0, b: 200, c: 9 }]);
   for (let i = 0; i < g.rounds.length; i++) {
     const lines = L.commentary(g, i, { a: 'Ann', b: 'Bo', c: 'Cy' }, () => 0.3);
-    assert.ok(lines.length >= 1 && lines.length <= 3);
+    assert.ok(lines.length >= 1 && lines.length <= 4);
     lines.forEach((l) => assert.doesNotMatch(l, /\{\w+\}|undefined/));
   }
 });
@@ -86,4 +86,30 @@ test('the single-file page keeps scores inside a script tag safely', () => {
   const json = html.match(/id="uno-data">([^]*?)<\/script>/)[1];
   assert.doesNotMatch(json, /</);
   assert.deepEqual(JSON.parse(json), data);
+});
+
+test('trophies: every one is listed, earned ones name their holders', () => {
+  const g = game('high', 10, [{ a: 3, b: 1 }, { a: 2, b: 0 }, { a: 4, b: 2 }], ['a', 'b']);
+  g.status = 'finished';
+  g.winnerId = 'a';
+  const state = { players: [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }], games: [g] };
+  const all = L.trophies(state);
+  assert.equal(all.length, L.TROPHY_COUNT);
+  const by = Object.fromEntries(all.map((t) => [t.key, t]));
+  assert.deepEqual(by.champ.holders, ['a']);
+  assert.equal(by.champ.value, '1 game');
+  assert.deepEqual(by.streak.holders, ['a']);
+  assert.equal(by.streak.value, '3 rounds');
+  assert.deepEqual(by.goose.holders, ['b']);
+  assert.deepEqual(by.ouch.holders, [], 'no lowest-wins games yet');
+  all.forEach((t) => assert.ok(t.title && t.how && t.quip && t.icon));
+});
+
+test('head to head counts who finished above whom', () => {
+  const g = game('high', 10, [{ a: 11, b: 3 }], ['a', 'b']);
+  g.status = 'finished';
+  g.winnerId = 'a';
+  const h = L.headToHead({ players: [{ id: 'a' }, { id: 'b' }], games: [g] });
+  assert.equal(h.a.b, 1);
+  assert.equal(h.b.a, 0);
 });

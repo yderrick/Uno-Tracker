@@ -46,6 +46,8 @@
   let draft = null; // { gameId, editingId, points }
   let setup = null; // { sel: Set, mode, target, name, open }
   let statsGameId = null;
+  let compareIds = null;
+  const TARGETS = [10, 15, 20, 25, 30, null];
   let justScored = null;
   let dealtFor = null;
 
@@ -84,6 +86,7 @@
   }
 
   const avatar = (p, cls = '') => `<span class="avatar pc-${esc((p && p.color) || 'ink')} ${cls}">${esc((p && p.emoji) || '❔')}</span>`;
+  const who = (p) => `<span class="who">${avatar(p)}<span>${esc(p ? p.name : 'Unknown')}</span></span>`;
 
   function commit(mutate, opts = {}) {
     if (!canEdit()) return toast('This scoreboard is view only.');
@@ -106,6 +109,7 @@
     S.stashUi({
       view,
       statsGameId,
+      compareIds,
       setup: setup && { ...setup, sel: [...setup.sel] },
       draft,
       scrollY: window.scrollY,
@@ -232,7 +236,7 @@
     $$('.tab').forEach((t) => (t.dataset.view === view ? t.setAttribute('aria-current', 'page') : t.removeAttribute('aria-current')));
     $('#demo-banner').hidden = !(state.isDemo && isAdmin());
     renderSync();
-    const views = { play: renderPlay, stats: renderStats, players: renderPlayers };
+    const views = { play: renderPlay, stats: renderStats, trophies: renderTrophies, players: renderPlayers };
     $('#view').innerHTML = (views[view] || renderPlay)();
     const after = { play: afterPlay, stats: afterStats, players: afterPlayers }[view];
     after && after();
@@ -282,7 +286,7 @@
     setup = {
       sel: new Set([...(last ? last.playerIds.filter((id) => P[id]) : []), ...(me ? [me] : [])]),
       mode: last ? last.mode : 'high',
-      target: last ? last.target : 500,
+      target: last && last.target && last.target <= 100 ? last.target : 20,
       name: freshName(),
       open: false,
     };
@@ -315,9 +319,7 @@
             <div class="field"><span>Who wins?</span><div class="seg" role="group" aria-label="Who wins">
               <button type="button" data-action="set-mode" data-mode="high" aria-pressed="${s.mode === 'high'}">Highest score</button>
               <button type="button" data-action="set-mode" data-mode="low" aria-pressed="${s.mode === 'low'}">Lowest score</button></div></div>
-            <div class="field"><span>Game ends at</span><div class="seg" role="group" aria-label="Game ends at">${[100, 250, 500, null]
-              .map((t) => `<button type="button" data-action="set-target" data-target="${t || ''}" aria-pressed="${s.target === t}">${t || 'No limit'}</button>`)
-              .join('')}</div></div>
+            <div class="field"><span>Game ends at</span>${targetPicker(s.target, 'setup-target')}</div>
           </div>
         </details>
         <div class="setup-go">
@@ -397,7 +399,8 @@
           ${
             finished
               ? `<button type="button" class="btn btn-ghost" data-action="new-game">New game</button>`
-              : `<button type="button" class="btn btn-ghost btn-small" data-action="add-to-game">+ Player</button>
+              : `<button type="button" class="btn btn-ghost btn-small" data-action="game-settings">⚙ Settings</button>
+                 <button type="button" class="btn btn-ghost btn-small" data-action="add-to-game">+ Player</button>
                  <button type="button" class="btn btn-ink btn-small" data-action="finish-game" ${g.rounds.length ? '' : 'disabled'}>Finish game</button>`
           }
         </div>
@@ -699,46 +702,219 @@
   function renderStats() {
     const games = [...state.games].sort((a, b) => b.createdAt - a.createdAt);
     const withRounds = games.filter((g) => g.rounds.length);
-    if (!withRounds.length) return emptyState('📊', 'No scores yet', 'Play a round and the leaderboard, trophies and charts show up here.', canManage() ? 'go-play' : null, 'Start a game');
+    if (!withRounds.length) return emptyState('📊', 'No scores yet', 'Play a round and the dashboards and charts show up here.', canManage() ? 'go-play' : null, 'Start a game');
+    if (!statsGameId || !withRounds.find((g) => g.id === statsGameId)) statsGameId = (currentGame() && currentGame().rounds.length ? currentGame() : withRounds[0]).id;
+    return `
+      <section class="game-head"><div class="game-title"><span class="eyebrow">Dashboards</span><h1>Stats</h1><p class="muted">Every round, every game, every grudge.</p></div>
+        <button type="button" class="btn btn-yellow" data-action="go" data-view="trophies">🏆 Trophy Room</button></section>
+      ${renderGameDashboard(findGame(statsGameId), withRounds)}
+      ${renderAllTime()}
+      <section class="panel"><div class="panel-head"><h2><span class="pip pip-blue"></span>Past games</h2></div>
+        <div class="games">${games.map((g) => gameCard(g, byId())).join('')}</div></section>`;
+  }
+
+  function renderGameDashboard(g, withRounds) {
+    const P = byId();
+    const st = L.standings(g);
+    const nm = (id) => (P[id] ? `${P[id].emoji} ${P[id].name}` : '?');
+    let big = { v: -Infinity };
+    g.rounds.forEach((r, i) => Object.entries(r.points || {}).forEach(([id, v]) => v > big.v && (big = { v, id, n: i + 1 })));
+    const mostWins = [...st].sort((a, b) => b.roundsWon - a.roundsWon)[0];
+    const handed = g.rounds.reduce((sum, r) => sum + Object.values(r.points || {}).reduce((a, b) => a + b, 0), 0);
+    const margin = st.length > 1 ? Math.abs(st[0].total - st[1].total) : 0;
+    let leadChanges = 0;
+    for (let i = 2; i <= g.rounds.length; i++) if (L.standingsAfter(g, i)[0].id !== L.standingsAfter(g, i - 1)[0].id) leadChanges++;
+    const tiles = [
+      ['var(--red)', g.status === 'finished' ? 'Winner' : 'Leader', nm(st[0].id), plural(st[0].total, 'point')],
+      ['var(--blue)', 'Rounds', g.rounds.length, plural(leadChanges, 'lead change')],
+      ['var(--yellow)', L.higherWins(g) ? 'Biggest round' : 'Worst hit', big.v, `${nm(big.id)} in R${big.n}`],
+      ['var(--green)', 'Most rounds won', mostWins.roundsWon, nm(mostWins.id)],
+      ['var(--red)', 'Avg per round', Math.round((handed / g.rounds.length) * 10) / 10, `${plural(handed, 'point')} total`],
+      ['var(--blue)', 'Gap: 1st to 2nd', margin, margin <= 1 ? 'Photo finish' : margin >= Math.max(3, Math.abs(st[0].total) / 2) ? 'Runaway' : 'Within reach'],
+    ];
+    const sheet = st
+      .map((row) => {
+        const played = g.rounds.filter((r) => r.points && row.id in r.points).length;
+        const best = Math.max(0, ...g.rounds.map((r) => (r.points && r.points[row.id]) || 0));
+        return `<tr><td>${who(P[row.id])}</td><td>${row.rank}</td><td><strong>${row.total}</strong></td><td>${row.roundsWon}</td><td>${played ? Math.round((row.roundsWon / played) * 100) : 0}%</td><td>${best}</td><td>${L.longestStreak(g, row.id)}</td></tr>`;
+      })
+      .join('');
+    return `
+      <section class="panel dash-head"><div class="panel-head" style="margin:0"><h2><span class="pip pip-red"></span>Game dashboard</h2>
+        <select class="select" id="stats-game" aria-label="Game">${withRounds.map((x) => `<option value="${esc(x.id)}" ${x.id === g.id ? 'selected' : ''}>${esc(x.name)} · ${esc(ago(x.createdAt))}${x.status === 'active' ? ' · live' : ''}</option>`).join('')}</select></div></section>
+      <section class="tiles">${tiles
+        .map(([c, l, v, sub]) => `<div class="tile" style="--tc:${c}"><span class="eyebrow">${esc(l)}</span><span class="tile-value ${typeof v === 'string' ? 'is-text' : ''}">${esc(v)}</span><span class="tile-sub">${esc(sub)}</span></div>`)
+        .join('')}</section>
+      <section class="panel"><div class="panel-head"><h2><span class="pip pip-red"></span>The race</h2><span class="entry-hint">Running totals after every round</span></div>
+        <div class="chart-box tall"><canvas id="ch-race" role="img" aria-label="Running totals after each round"></canvas></div></section>
+      <div class="chart-grid">
+        <section class="panel"><div class="panel-head"><h2><span class="pip pip-blue"></span>Momentum</h2><span class="entry-hint">Rank after each round</span></div><div class="chart-box"><canvas id="ch-bump" role="img" aria-label="Rank after each round"></canvas></div></section>
+        <section class="panel"><div class="panel-head"><h2><span class="pip pip-yellow"></span>Points per round</h2><span class="entry-hint">Who scored what</span></div><div class="chart-box"><canvas id="ch-rounds" role="img" aria-label="Points per round"></canvas></div></section>
+      </div>
+      <div class="chart-grid">
+        <section class="panel"><div class="panel-head"><h2><span class="pip pip-green"></span>Who wins rounds</h2><span class="entry-hint">Share of rounds won</span></div><div class="chart-box short"><canvas id="ch-share" role="img" aria-label="Share of rounds won"></canvas></div></section>
+        <section class="panel"><div class="panel-head"><h2><span class="pip pip-wild"></span>Stat sheet</h2></div>
+          <div class="table-wrap"><table><thead><tr><th>Player</th><th>Rank</th><th>Total</th><th>Rounds won</th><th>Win %</th><th>Best round</th><th>Best streak</th></tr></thead><tbody>${sheet}</tbody></table></div></section>
+      </div>`;
+  }
+
+  function renderAllTime() {
     const P = byId();
     const stats = Object.values(L.playerStats(state)).filter((s) => s.rounds > 0);
-    const aw = L.awards(state);
+    const held = trophyCounts();
     const finished = state.games.filter((g) => g.status === 'finished').length;
-    const totalRounds = withRounds.reduce((s, g) => s + g.rounds.length, 0);
-    if (!statsGameId || !withRounds.find((g) => g.id === statsGameId)) statsGameId = (currentGame() && currentGame().rounds.length ? currentGame() : withRounds[0]).id;
-
+    const totalRounds = state.games.reduce((sum, g) => sum + g.rounds.length, 0);
+    const totalPts = state.games.reduce((sum, g) => sum + g.rounds.reduce((a, r) => a + Object.values(r.points || {}).reduce((x, y) => x + y, 0), 0), 0);
+    if (!compareIds || !compareIds.every((id) => stats.some((s) => s.id === id))) compareIds = [...stats].sort((a, b) => b.rounds - a.rounds).slice(0, 4).map((s) => s.id);
     const board = [...stats]
       .sort((a, b) => b.wins - a.wins || b.winRate - a.winRate || b.roundsWon - a.roundsWon)
       .map(
         (s, i) =>
-          `<tr><td><span class="who"><b class="rank-num">${i + 1}</b>${avatar(P[s.id])}<span>${esc(P[s.id] ? P[s.id].name : '?')}</span></span></td><td><strong>${s.wins}</strong></td><td>${s.games}</td><td>${Math.round(s.winRate * 100)}%</td><td>${s.roundsWon}</td><td>${s.bestRound || '—'}</td></tr>`
+          `<tr><td><span class="who"><b class="rank-num">${i + 1}</b>${avatar(P[s.id])}<span>${esc(P[s.id] ? P[s.id].name : '?')}</span></span></td><td><strong>${s.wins}</strong> / ${s.finished}</td><td>${Math.round(s.winRate * 100)}%</td><td>${s.roundsWon}</td><td>${Math.round(s.roundWinRate * 100)}%</td><td>${s.bestRound || '—'}</td><td>${s.longestStreak}</td><td>${held[s.id] || 0} 🏆</td></tr>`
       )
       .join('');
-
+    const h2h = L.headToHead(state);
+    const hp = stats.map((s) => s.id);
+    const h2hTable =
+      finished && hp.length > 1
+        ? `<div class="table-wrap"><table class="h2h"><thead><tr><th>Row beat column</th>${hp.map((id) => `<th title="${esc(P[id] && P[id].name)}">${esc(P[id] ? P[id].emoji : '')} ${esc(P[id] ? P[id].name : '')}</th>`).join('')}</tr></thead><tbody>${hp
+            .map(
+              (a) =>
+                `<tr><td>${who(P[a])}</td>${hp
+                  .map((b) => {
+                    if (a === b) return '<td class="self"></td>';
+                    const w = h2h[a][b];
+                    const l = h2h[b][a];
+                    const tone = w > l ? 'var(--good)' : w < l ? 'var(--bad)' : 'var(--muted)';
+                    return `<td title="${esc(P[a] && P[a].name)} finished above ${esc(P[b] && P[b].name)} ${w} of ${w + l} times"><strong style="color:${tone}">${w}</strong><span class="muted">–${l}</span></td>`;
+                  })
+                  .join('')}</tr>`
+            )
+            .join('')}</tbody></table></div>`
+        : '<div class="empty"><p>Finish a game to see who has whose number.</p></div>';
     return `
-      <section class="game-head"><div class="game-title"><span class="eyebrow">All-time</span><h1>Stats</h1></div></section>
+      <section class="panel dash-head"><div class="panel-head" style="margin:0"><h2><span class="pip pip-green"></span>All-time</h2><span class="entry-hint">Across every game on this page</span></div></section>
       <section class="tiles">
         <div class="tile" style="--tc:var(--red)"><span class="eyebrow">Games</span><span class="tile-value">${state.games.length}</span><span class="tile-sub">${finished} finished</span></div>
-        <div class="tile" style="--tc:var(--yellow)"><span class="eyebrow">Rounds</span><span class="tile-value">${totalRounds}</span><span class="tile-sub">across all games</span></div>
+        <div class="tile" style="--tc:var(--yellow)"><span class="eyebrow">Rounds dealt</span><span class="tile-value">${totalRounds}</span><span class="tile-sub">and not one of them fair</span></div>
+        <div class="tile" style="--tc:var(--green)"><span class="eyebrow">Points scored</span><span class="tile-value">${totalPts.toLocaleString()}</span><span class="tile-sub">across all games</span></div>
         <div class="tile" style="--tc:var(--blue)"><span class="eyebrow">Players</span><span class="tile-value">${stats.length}</span><span class="tile-sub">have played</span></div>
       </section>
       <section class="panel"><div class="panel-head"><h2><span class="pip pip-green"></span>Leaderboard</h2><span class="entry-hint">Ranked by games won</span></div>
-        <div class="table-wrap"><table><thead><tr><th>Player</th><th>Wins</th><th>Games</th><th>Win %</th><th>Rounds won</th><th>Best round</th></tr></thead><tbody>${board}</tbody></table></div></section>
-      ${
-        aw.length
-          ? `<section class="panel"><div class="panel-head"><h2><span class="pip pip-yellow"></span>Trophies</h2></div><div class="awards">${aw
-              .map(
-                (a, i) =>
-                  `<div class="award pc-${esc(P[a.winnerId] ? P[a.winnerId].color : 'ink')}" style="--i:${i}"><span class="award-icon">${a.icon}</span><div style="min-width:0"><div class="award-title">${esc(a.title)}</div><div class="award-blurb">${esc(a.blurb)}</div><div class="award-who">${avatar(P[a.winnerId])}<span>${esc(P[a.winnerId] ? P[a.winnerId].name : '?')}</span><span class="award-value">${esc(a.value)}</span></div></div></div>`
-              )
-              .join('')}</div></section>`
-          : ''
+        <div class="table-wrap"><table><thead><tr><th>Player</th><th>Won / finished</th><th>Win %</th><th>Rounds won</th><th>Round win %</th><th>Best round</th><th>Best streak</th><th>Trophies</th></tr></thead><tbody>${board}</tbody></table></div></section>
+      <div class="chart-grid">
+        <section class="panel"><div class="panel-head"><h2><span class="pip pip-red"></span>Wins</h2><span class="entry-hint">Finished games</span></div><div class="chart-box tall"><canvas id="ch-wins" role="img" aria-label="Games won per player"></canvas></div></section>
+        <section class="panel"><div class="panel-head"><h2><span class="pip pip-wild"></span>Player DNA</h2><span class="entry-hint">Compare up to 4</span></div>
+          <div class="chips" style="margin-bottom:12px">${stats
+            .map((s) => `<button type="button" class="chip pc-${esc(P[s.id] ? P[s.id].color : 'ink')}" data-action="compare-toggle" data-pid="${esc(s.id)}" aria-pressed="${compareIds.includes(s.id)}">${avatar(P[s.id])}<span>${esc(P[s.id] ? P[s.id].name : '?')}</span></button>`)
+            .join('')}</div>
+          <div class="chart-box"><canvas id="ch-radar" role="img" aria-label="Player comparison"></canvas></div></section>
+      </div>
+      <section class="panel"><div class="panel-head"><h2><span class="pip pip-blue"></span>Head to head</h2><span class="entry-hint">How often each row player finished above each column player</span></div>${h2hTable}</section>`;
+  }
+
+  /* ----------------------------------------------------------------- TROPHIES */
+  function trophyCounts() {
+    const held = {};
+    L.trophies(state).forEach((t) => t.holders.forEach((id) => (held[id] = (held[id] || 0) + 1)));
+    return held;
+  }
+
+  function renderTrophies() {
+    const P = byId();
+    const all = L.trophies(state);
+    const earned = all.filter((t) => t.holders.length);
+    const locked = all.filter((t) => !t.holders.length);
+    const shelf = {};
+    earned.forEach((t) => t.holders.forEach((id) => (shelf[id] = shelf[id] || []).push(t)));
+    const shelfRows = Object.entries(shelf)
+      .sort((a, b) => b[1].length - a[1].length)
+      .map(
+        ([id, ts], i) =>
+          `<div class="shelf-row"><b class="rank-num">${i + 1}</b>${who(P[id])}<span class="shelf-icons" title="${esc(ts.map((t) => t.title).join(', '))}">${ts.map((t) => `<span>${t.icon}</span>`).join('')}</span><strong class="shelf-count">${ts.length}</strong></div>`
+      )
+      .join('');
+    const names = (ids) => listJoin(ids.map((id) => (P[id] ? P[id].name : 'Someone')));
+    const card = (t, i) => {
+      const p = P[t.holders[0]];
+      const quip = t.holders.length ? t.quip.replace('{name}', names(t.holders)).replace('{value}', t.value) : '';
+      return `<article class="trophy-card pc-${esc(p ? p.color : 'ink')} ${t.holders.length ? '' : 'is-locked'}" style="--i:${i}">
+        <div class="trophy-medal" aria-hidden="true">${t.holders.length ? t.icon : '🔒'}</div>
+        <div class="trophy-body">
+          <h3>${esc(t.title)}</h3>
+          ${
+            t.holders.length
+              ? `<div class="trophy-who">${t.holders.map((id) => avatar(P[id])).join('')}<span>${esc(names(t.holders))}</span><span class="trophy-value">${esc(t.value)}</span></div>
+                 <p class="trophy-quip">${esc(quip)}</p>`
+              : `<div class="trophy-who"><span class="muted">Up for grabs</span></div>`
+          }
+          <p class="trophy-how">${t.holders.length ? 'How it’s won: ' : 'How to win it: '}${esc(t.how)}</p>
+        </div>
+      </article>`;
+    };
+    return `
+      <section class="game-head"><div class="game-title"><span class="eyebrow">${earned.length} of ${all.length} trophies handed out</span><h1>Trophy Room</h1>
+        <p class="muted">Glory, shame and everything in between. Trophies move to whoever earns them, after every round.</p></div></section>
+      ${shelfRows ? `<section class="panel"><div class="panel-head"><h2><span class="pip pip-yellow"></span>Trophy shelf</h2><span class="entry-hint">Who’s hoarding the hardware</span></div><div class="shelf">${shelfRows}</div></section>` : ''}
+      <section class="trophies">${earned.map(card).join('')}</section>
+      ${locked.length ? `<section class="panel"><div class="panel-head"><h2><span class="pip pip-wild"></span>Still up for grabs</h2><span class="entry-hint">${plural(locked.length, 'trophy').replace('trophys', 'trophies')} nobody has earned yet</span></div><div class="trophies">${locked.map(card).join('')}</div></section>` : ''}`;
+  }
+
+  /* ------------------------------------------------------------- GAME SETTINGS */
+  function targetPicker(target, inputId) {
+    const custom = target && !TARGETS.includes(target);
+    return `<div class="seg" role="group" aria-label="Game ends at">${TARGETS.map(
+      (t) => `<button type="button" data-action="set-target" data-for="${inputId}" data-target="${t || ''}" aria-pressed="${target === t}">${t || 'No limit'}</button>`
+    ).join('')}
+      <input type="number" min="1" step="1" inputmode="numeric" class="seg-input ${custom ? 'is-on' : ''}" id="${inputId}" placeholder="Other" value="${custom ? target : ''}" aria-label="Other end score"></div>`;
+  }
+
+  function openGameSettings() {
+    const g = currentGame();
+    if (!g) return;
+    const draftS = { mode: g.mode, target: g.target };
+    openModal(
+      `${modalHead('Game settings', 'Changes apply to everyone at the table.')}
+      <label class="field"><span>Game name</span><input type="text" id="gs-name" class="text-input" value="${esc(g.name)}" maxlength="60"></label>
+      <div class="field"><span>Who wins?</span><div class="seg" role="group" aria-label="Who wins" id="gs-mode">
+        <button type="button" data-mode="high" aria-pressed="${g.mode === 'high'}">Highest score</button>
+        <button type="button" data-mode="low" aria-pressed="${g.mode === 'low'}">Lowest score</button></div></div>
+      <div class="field"><span>Game ends at</span>${targetPicker(g.target, 'gs-target')}</div>
+      <div class="btn-row" style="justify-content:flex-end"><button type="button" class="btn btn-ghost" data-action="close-modal">Cancel</button><button type="button" class="btn btn-red" id="gs-save">Save</button></div>`,
+      {
+        label: 'Game settings',
+        onMount: (m) => {
+          $('#gs-mode', m).addEventListener('click', (e) => {
+            const b = e.target.closest('[data-mode]');
+            if (!b) return;
+            draftS.mode = b.dataset.mode;
+            $$('[data-mode]', m).forEach((x) => x.setAttribute('aria-pressed', x === b));
+          });
+          m.addEventListener('target-change', (e) => (draftS.target = e.detail));
+          $('#gs-save', m).addEventListener('click', () => {
+            const name = $('#gs-name', m).value.trim() || g.name;
+            closeModal();
+            let done = null;
+            commit((st) => {
+              const game = st.games.find((x) => x.id === g.id);
+              const modeChanged = game.mode !== draftS.mode;
+              Object.assign(game, { name, mode: draftS.mode, target: draftS.target || null });
+              if (modeChanged) game.rounds.forEach((r) => (r.winnerId = L.roundWinner(game, r.points)));
+              const over = L.checkOver(game);
+              if (over.over) {
+                game.status = 'finished';
+                game.winnerId = over.winnerId;
+                game.finishedAt = Date.now();
+                game.endLine = L.gameOverLine(game, names());
+                done = game;
+              }
+            });
+            if (done && role === 'local') showGameOver(done);
+            toast('Game settings saved.');
+          });
+        },
       }
-      <section class="panel"><div class="panel-head"><h2><span class="pip pip-red"></span>Score race</h2>
-          <select class="select" id="stats-game" aria-label="Game">${withRounds.map((x) => `<option value="${esc(x.id)}" ${x.id === statsGameId ? 'selected' : ''}>${esc(x.name)} · ${esc(ago(x.createdAt))}</option>`).join('')}</select></div>
-        <div class="chart-box"><canvas id="ch-race" role="img" aria-label="Running totals after each round"></canvas></div></section>
-      <section class="panel"><div class="panel-head"><h2><span class="pip pip-blue"></span>Past games</h2></div>
-        <div class="games">${games.map((g) => gameCard(g, P)).join('')}</div></section>`;
+    );
   }
 
   function gameCard(g, P) {
@@ -770,10 +946,18 @@
       render();
     });
     if (!C.available()) {
-      $$('.chart-box').forEach((b) => (b.innerHTML = '<div class="chart-fallback">The chart needs an internet connection to load. Everything else works offline.</div>'));
+      $$('.chart-box').forEach((b) => (b.innerHTML = '<div class="chart-fallback">Charts need an internet connection to load. Everything else works offline.</div>'));
       return;
     }
-    C.race($('#ch-race'), findGame(statsGameId), byId());
+    const P = byId();
+    const g = findGame(statsGameId);
+    C.race($('#ch-race'), g, P);
+    C.bump($('#ch-bump'), g, P);
+    C.perRound($('#ch-rounds'), g, P);
+    C.share($('#ch-share'), g, P);
+    const stats = Object.values(L.playerStats(state)).filter((x) => x.rounds > 0);
+    C.wins($('#ch-wins'), stats, P);
+    C.radar($('#ch-radar'), stats.filter((x) => (compareIds || []).includes(x.id)), P);
   }
 
   /* ------------------------------------------------------------------ PLAYERS */
@@ -1093,6 +1277,7 @@
     <nav class="tabs" aria-label="Sections">
       <button type="button" class="tab c-red" data-action="go" data-view="play"><span class="tab-glyph">▶</span>Game</button>
       <button type="button" class="tab c-yellow" data-action="go" data-view="stats"><span class="tab-glyph">★</span>Stats</button>
+      <button type="button" class="tab c-blue" data-action="go" data-view="trophies"><span class="tab-glyph">🏆</span>Trophies</button>
       <button type="button" class="tab c-green" data-action="go" data-view="players"><span class="tab-glyph">☺</span>Players</button>
     </nav>
     <div class="top-actions">
@@ -1121,7 +1306,8 @@
 
   function restoreUi() {
     if (!bootUi) return;
-    if (['play', 'stats', 'players'].includes(bootUi.view)) view = bootUi.view;
+    if (['play', 'stats', 'trophies', 'players'].includes(bootUi.view)) view = bootUi.view;
+    compareIds = bootUi.compareIds || null;
     statsGameId = bootUi.statsGameId || null;
     if (bootUi.setup) setup = { ...bootUi.setup, sel: new Set(bootUi.setup.sel || []) };
     if (bootUi.draft && state.games.some((g) => g.id === bootUi.draft.gameId)) draft = bootUi.draft;
@@ -1204,7 +1390,17 @@
       render();
     },
     'set-target': (el) => {
-      ensureSetup().target = el.dataset.target ? Number(el.dataset.target) : null;
+      const t = el.dataset.target ? Number(el.dataset.target) : null;
+      if (el.dataset.for === 'gs-target') {
+        const group = el.closest('.seg');
+        $$('[data-target]', group).forEach((b) => b.setAttribute('aria-pressed', b === el));
+        const input = $('.seg-input', group);
+        input.value = '';
+        input.classList.remove('is-on');
+        el.dispatchEvent(new CustomEvent('target-change', { bubbles: true, detail: t }));
+        return;
+      }
+      ensureSetup().target = t;
       render();
     },
     'start-game': () => {
@@ -1282,9 +1478,31 @@
       });
     },
     'add-to-game': () => guardGame() && openAddToGame(),
+    'game-settings': () => guardGame() && openGameSettings(),
+    'compare-toggle': (el) => {
+      const id = el.dataset.pid;
+      const cur = compareIds || [];
+      if (cur.includes(id)) {
+        if (cur.length > 1) compareIds = cur.filter((x) => x !== id);
+      } else compareIds = [...cur, id].slice(-4);
+      render();
+    },
     'claim-player': (el) => claimPlayer(el.dataset.pid),
     'edit-player': (el) => canEditPlayer(byId()[el.dataset.pid] || {}) && openPlayerEditor(el.dataset.pid),
   };
+
+  // "Other" end score: typed into the box next to the presets.
+  document.addEventListener('input', (e) => {
+    const input = e.target.closest && e.target.closest('.seg-input');
+    if (!input) return;
+    const v = Math.round(Number(input.value));
+    const t = v > 0 ? v : null;
+    const group = input.closest('.seg');
+    $$('[data-target]', group).forEach((b) => b.setAttribute('aria-pressed', String(!t && b.dataset.target === '')));
+    input.classList.toggle('is-on', !!t);
+    if (input.id === 'setup-target') ensureSetup().target = t;
+    else input.dispatchEvent(new CustomEvent('target-change', { bubbles: true, detail: t }));
+  });
 
   document.addEventListener('click', (e) => {
     const el = e.target.closest('[data-action]');
