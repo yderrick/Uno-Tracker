@@ -17,10 +17,12 @@ Along the way, the scoreboard shows each player as an Uno card with their rank a
 
 ## Saving and sharing scores
 
-**On the hosted page (claude.ai):** the scores are saved inside the page itself. Whenever the scorekeeper adds a round, the page saves a new version and every open copy refreshes by itself, so the whole table follows along live.
+**On the hosted page (claude.ai):** the scores are saved inside the page itself. Whenever someone saves a round, the page publishes a new version and every open copy refreshes by itself, so the whole table follows along live.
 
-- **Scorekeeper:** the page's owner, plus anyone invited as an Editor, can add players, start games and enter scores. Their header says "● Scorekeeper".
-- **Everyone else:** anyone with a public link can watch the scoreboard, stats and players, no Claude account needed. Their header says "👀 Watching live", and the editing buttons are hidden.
+- **Signed-in players:** everyone who can save changes (the page owner and anyone invited as an Editor) must pick a username the first time they open the page. The username is their player and is linked to their Claude account, so it follows them across devices. If the host doesn't share an account id, the choice is remembered on that device, and "Already picked one on another device?" lets them reclaim it.
+- **Who can change scores:** the players in a game who have a username can add, fix and delete its rounds, add a late player and finish it. Everyone else signed in watches that game. The page owner can change anything, back up or restore, and remove players.
+- **Guests:** players without a Claude account can be added as guests. They show up on the scoreboard, but can't change scores themselves.
+- **Watching without an account:** anyone who can only view the page (for example through a public link) sees the scoreboard, stats and players with no sign-in. Their header says "👀 Watching live".
 
 **Opened as a file or from any other website:** scores are saved in that browser (`localStorage`). Use **⇅ Back up & restore** to download a backup or move scores to another device.
 

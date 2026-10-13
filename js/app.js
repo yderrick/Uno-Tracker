@@ -35,6 +35,11 @@
   let role = HOSTED ? 'checking' : 'local';
   let state = HOSTED ? EMBEDDED || S.emptyState() : S.loadLocal() || EMBEDDED || window.UnoDemo.build(L);
   let artifactApi = null;
+  // Who is looking: the Claude account (when the host shares it) and the player it plays as.
+  let isOwnerView = false;
+  let accountId = null;
+  let me = null;
+  const CLAIM_KEY = 'uno-tracker:me';
   let publishTimer = null;
   let loadedSeen = null;
   let view = 'play';
@@ -57,7 +62,15 @@
   const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
   const listJoin = (a) => (a.length <= 1 ? a.join('') : `${a.slice(0, -1).join(', ')} and ${a[a.length - 1]}`);
   const ruleText = (g) => `${L.higherWins(g) ? 'Highest' : 'Lowest'} score wins${g.target ? ` · ${L.higherWins(g) ? 'first to' : 'ends at'} ${g.target}` : ''}`;
+  // canEdit: this view may save at all. The rest is the table's own rules:
+  // everyone who can save picks a username first; players in a game can change its
+  // scores; the page owner can change anything.
   const canEdit = () => role === 'local' || role === 'editor';
+  const ready = () => role === 'local' || (role === 'editor' && !!me);
+  const isAdmin = () => role === 'local' || (ready() && isOwnerView);
+  const inGame = (g) => !!(me && g && g.playerIds.includes(me));
+  const canEditGame = (g) => role === 'local' || (ready() && (isOwnerView || inGame(g)));
+  const canManage = ready;
   const isEditing = (g) => !!(g && draft && draft.gameId === g.id && draft.editingId);
 
   function ago(ts) {
@@ -142,7 +155,7 @@
     const used = state.players.map((p) => p.color);
     const color = COLORS.find((c) => !used.includes(c)) || COLORS[state.players.length % COLORS.length];
     const free = EMOJIS.filter((e) => !state.players.some((p) => p.emoji === e));
-    return { id: uid(), name: name.slice(0, 24), emoji: pick(free.length ? free : EMOJIS), color, createdAt: Date.now() };
+    return { id: uid(), name: name.slice(0, 24), emoji: pick(free.length ? free : EMOJIS), color, createdAt: Date.now(), account: false };
   }
 
   function freshName() {
@@ -174,13 +187,14 @@
 
   /* ------------------------------------------------------------------- modals */
   let modalCleanup = null;
-  function openModal(html, { onMount, label = 'Dialog' } = {}) {
+  function openModal(html, { onMount, label = 'Dialog', locked = false } = {}) {
+    if (!locked && $('#gate-form')) return null; // the username step comes first
     closeModal();
     const root = $('#modal-root');
     root.innerHTML = `<div class="modal-backdrop" data-modal-backdrop><div class="modal" role="dialog" aria-modal="true" aria-label="${esc(label)}">${html}</div></div>`;
     const back = $('[data-modal-backdrop]', root);
-    back.addEventListener('mousedown', (e) => e.target === back && closeModal());
-    const onKey = (e) => e.key === 'Escape' && closeModal();
+    back.addEventListener('mousedown', (e) => !locked && e.target === back && closeModal());
+    const onKey = (e) => !locked && e.key === 'Escape' && closeModal();
     document.addEventListener('keydown', onKey);
     modalCleanup = () => document.removeEventListener('keydown', onKey);
     const modal = $('.modal', root);
@@ -213,15 +227,17 @@
 
   /* =================================================================== render */
   function render() {
+    me = resolveMe();
     C.destroyAll();
     $$('.tab').forEach((t) => (t.dataset.view === view ? t.setAttribute('aria-current', 'page') : t.removeAttribute('aria-current')));
-    $('#demo-banner').hidden = !(state.isDemo && canEdit());
+    $('#demo-banner').hidden = !(state.isDemo && isAdmin());
     renderSync();
     const views = { play: renderPlay, stats: renderStats, players: renderPlayers };
     $('#view').innerHTML = (views[view] || renderPlay)();
     const after = { play: afterPlay, stats: afterStats, players: afterPlayers }[view];
     after && after();
     justScored = null;
+    if (role === 'editor' && !me && !$('#gate-form')) openGate();
   }
 
   function renderSync(override) {
@@ -230,7 +246,7 @@
       local: 'Saved on this device',
       checking: 'Connecting…',
       viewer: '👀 Watching live',
-      editor: '● Scorekeeper',
+      editor: me && byId()[me] ? `● ${byId()[me].name}` : '● Signed in',
     }[role];
     chip.classList.toggle('is-cloud', role === 'editor');
     chip.textContent = override || text;
@@ -238,17 +254,17 @@
       role === 'viewer'
         ? 'Scores update by themselves when the scorekeeper adds a round'
         : role === 'editor'
-          ? 'Your changes are saved for everyone with the link'
+          ? 'Signed in. You can change the scores of games you are playing in.'
           : 'Scores are saved in this browser';
     $('#mute-btn').textContent = FX.muted ? '🔇' : '🔊';
-    $('#backup-btn').hidden = !canEdit();
+    $('#backup-btn').hidden = !isAdmin();
   }
 
   /* ---------------------------------------------------------------- GAME TAB */
   function renderPlay() {
     const g = currentGame();
     if (g) return renderGame(g);
-    return canEdit() ? renderSetup() : renderWaiting();
+    return canManage() ? renderSetup() : renderWaiting();
   }
 
   function renderWaiting() {
@@ -264,7 +280,7 @@
     const last = [...state.games].sort((a, b) => b.createdAt - a.createdAt)[0];
     const P = byId();
     setup = {
-      sel: new Set(last ? last.playerIds.filter((id) => P[id]) : []),
+      sel: new Set([...(last ? last.playerIds.filter((id) => P[id]) : []), ...(me ? [me] : [])]),
       mode: last ? last.mode : 'high',
       target: last ? last.target : 500,
       name: freshName(),
@@ -280,16 +296,16 @@
     const chips = roster
       .map(
         (p) =>
-          `<button type="button" class="pick pc-${esc(p.color)}" data-action="toggle-pick" data-pid="${esc(p.id)}" aria-pressed="${s.sel.has(p.id)}">${avatar(p, 'avatar-lg')}<span class="pick-name">${esc(p.name)}</span><span class="pick-check" aria-hidden="true">✓</span></button>`
+          `<button type="button" class="pick pc-${esc(p.color)}" data-action="toggle-pick" data-pid="${esc(p.id)}" aria-pressed="${s.sel.has(p.id)}">${avatar(p, 'avatar-lg')}<span class="pick-name">${esc(p.name)}</span>${playerTag(p)}<span class="pick-check" aria-hidden="true">✓</span></button>`
       )
       .join('');
     const n = s.sel.size;
     return `
-      <section class="game-head"><div class="game-title"><span class="eyebrow">New game</span><h1>Who’s playing?</h1><p class="muted">Tap the players at the table. New players are saved for next time.</p></div></section>
+      <section class="game-head"><div class="game-title"><span class="eyebrow">New game</span><h1>Who’s playing?</h1><p class="muted">Tap the players at the table. Friends who sign in with their own username show up here, and you can add guests who don’t have a Claude account.</p></div></section>
       <section class="panel setup">
         <div class="picks">${chips || '<p class="muted">No players yet. Add the first one below.</p>'}</div>
         <form class="add-inline" id="setup-add">
-          <input type="text" id="setup-new" class="text-input" placeholder="Add a new player" maxlength="24" aria-label="New player name" autocomplete="off">
+          <input type="text" id="setup-new" class="text-input" placeholder="Add a guest (no Claude account)" maxlength="24" aria-label="Guest player name" autocomplete="off">
           <button type="submit" class="btn btn-ink">Add</button>
         </form>
         <details class="options" id="setup-options" ${s.open ? 'open' : ''}>
@@ -374,10 +390,10 @@
           <div class="game-meta">
             ${finished ? `<span class="pill pill-done">🏆 ${esc(P[g.winnerId] ? P[g.winnerId].name : '')} won</span>` : '<span class="pill pill-live">Live</span>'}
             <span class="pill">${esc(ruleText(g))}</span>
-            ${role === 'viewer' && !finished ? '<span class="pill">👀 Updates by itself</span>' : ''}
+            ${!canEditGame(g) && !finished ? `<span class="pill">${ready() ? '👀 You’re not in this game, so you’re watching' : '👀 Updates by itself'}</span>` : ''}
           </div>
         </div>
-        <div class="btn-row" ${canEdit() ? '' : 'hidden'}>
+        <div class="btn-row" ${(finished ? canManage() : canEditGame(g)) ? '' : 'hidden'}>
           ${
             finished
               ? `<button type="button" class="btn btn-ghost" data-action="new-game">New game</button>`
@@ -388,9 +404,9 @@
       </section>
       <section class="board" aria-label="Scoreboard">${cards}</section>
       ${
-        canEdit() || finished
+        canEditGame(g) || finished
           ? `<div class="grid-2">
-        <section class="panel" id="entry-panel">${canEdit() && (!finished || isEditing(g)) ? renderEntry(g) : renderFinishedPanel(g)}</section>
+        <section class="panel" id="entry-panel">${canEditGame(g) && (!finished || isEditing(g)) ? renderEntry(g) : renderFinishedPanel(g)}</section>
         <section class="panel">${renderFeed(g)}</section>
       </div>`
           : `<section class="panel">${renderFeed(g)}</section>`
@@ -572,13 +588,13 @@
             return `<td>${star}<span class="cell-heat pc-${esc(P[id] ? P[id].color : 'ink')}" style="background:color-mix(in srgb, var(--pc) ${heat}%, transparent)">${v}</span></td>`;
           })
           .join('');
-        if (!canEdit()) return `<tr><th scope="row" style="text-align:left">R${i + 1}</th>${cells}</tr>`;
+        if (!canEditGame(g)) return `<tr><th scope="row" style="text-align:left">R${i + 1}</th>${cells}</tr>`;
         return `<tr><th scope="row" style="text-align:left">R${i + 1}</th>${cells}<td><span class="row-actions"><button type="button" data-action="edit-round" data-round="${esc(r.id)}" aria-label="Edit round ${i + 1}" title="Edit">✎</button><button type="button" data-action="delete-round" data-round="${esc(r.id)}" aria-label="Delete round ${i + 1}" title="Delete">✕</button></span></td></tr>`;
       })
       .join('');
-    return `<div class="panel-head"><h2><span class="pip pip-green"></span>Scorecard</h2><span class="entry-hint">★ round winner${canEdit() ? ' · ✎ to fix a round' : ''}</span></div>
-      <div class="table-wrap"><table><thead><tr><th scope="col">Round</th>${head}${canEdit() ? '<th scope="col"><span class="sr-only">Actions</span></th>' : ''}</tr></thead>
-      <tbody>${rows}</tbody><tfoot><tr><td>Total</td>${g.playerIds.map((id) => `<td>${totals[id]}</td>`).join('')}${canEdit() ? '<td></td>' : ''}</tr></tfoot></table></div>`;
+    return `<div class="panel-head"><h2><span class="pip pip-green"></span>Scorecard</h2><span class="entry-hint">★ round winner${canEditGame(g) ? ' · ✎ to fix a round' : ''}</span></div>
+      <div class="table-wrap"><table><thead><tr><th scope="col">Round</th>${head}${canEditGame(g) ? '<th scope="col"><span class="sr-only">Actions</span></th>' : ''}</tr></thead>
+      <tbody>${rows}</tbody><tfoot><tr><td>Total</td>${g.playerIds.map((id) => `<td>${totals[id]}</td>`).join('')}${canEditGame(g) ? '<td></td>' : ''}</tr></tfoot></table></div>`;
   }
 
   function podium(g) {
@@ -600,8 +616,8 @@
       <span class="eyebrow">Champion</span>
       <h2>${esc(w ? `${w.emoji} ${w.name}` : 'Someone')}</h2>
       ${podium(g)}
-      <div class="btn-row" style="justify-content:center;margin-top:8px" ${canEdit() ? '' : 'hidden'}>
-        <button type="button" class="btn btn-green" data-action="play-again" data-game="${esc(g.id)}">Play again, same players</button>
+      <div class="btn-row" style="justify-content:center;margin-top:8px" ${canManage() ? '' : 'hidden'}>
+        ${canEditGame(g) ? `<button type="button" class="btn btn-green" data-action="play-again" data-game="${esc(g.id)}">Play again, same players</button>` : ''}
         <button type="button" class="btn btn-ghost" data-action="new-game">New game</button>
       </div>
     </div>`;
@@ -635,7 +651,7 @@
         ${podium(g)}
       </div>
       <div class="btn-row" style="justify-content:center">
-        ${canEdit() ? `<button type="button" class="btn btn-green" data-action="play-again" data-game="${esc(g.id)}">Play again</button>` : ''}
+        ${canEditGame(g) ? `<button type="button" class="btn btn-green" data-action="play-again" data-game="${esc(g.id)}">Play again</button>` : ''}
         <button type="button" class="btn btn-ghost" data-action="close-modal">See final scores</button>
       </div>`,
       { label: 'Game over' }
@@ -683,7 +699,7 @@
   function renderStats() {
     const games = [...state.games].sort((a, b) => b.createdAt - a.createdAt);
     const withRounds = games.filter((g) => g.rounds.length);
-    if (!withRounds.length) return emptyState('📊', 'No scores yet', 'Play a round and the leaderboard, trophies and charts show up here.', canEdit() ? 'go-play' : null, 'Start a game');
+    if (!withRounds.length) return emptyState('📊', 'No scores yet', 'Play a round and the leaderboard, trophies and charts show up here.', canManage() ? 'go-play' : null, 'Start a game');
     const P = byId();
     const stats = Object.values(L.playerStats(state)).filter((s) => s.rounds > 0);
     const aw = L.awards(state);
@@ -739,9 +755,9 @@
             `<div class="mini-row"><b>${row.rank}</b><span class="who">${avatar(P[row.id])}<span>${esc(P[row.id] ? P[row.id].name : '?')}${g.winnerId === row.id ? ' 🏆' : ''}</span></span><span class="num">${row.total}</span><div class="mini-bar pc-${esc(P[row.id] ? P[row.id].color : 'ink')}"><i style="width:${(Math.abs(row.total) / max) * 100}%"></i></div></div>`
         )
         .join('')}</div>
-      <div class="btn-row" ${canEdit() ? '' : 'hidden'}>
+      <div class="btn-row" ${canManage() ? '' : 'hidden'}>
         <button type="button" class="btn ${g.status === 'active' ? 'btn-red' : 'btn-ink'} btn-small" data-action="open-game" data-game="${esc(g.id)}">${g.status === 'active' ? 'Resume' : 'Open'}</button>
-        <button type="button" class="btn btn-ghost btn-small" data-action="delete-game" data-game="${esc(g.id)}" aria-label="Delete ${esc(g.name)}">Delete</button>
+        ${isAdmin() || inGame(g) ? `<button type="button" class="btn btn-ghost btn-small" data-action="delete-game" data-game="${esc(g.id)}" aria-label="Delete ${esc(g.name)}">Delete</button>` : ''}
       </div>
     </article>`;
   }
@@ -768,14 +784,14 @@
       .map((p) => {
         const s = stats[p.id];
         return `<article class="roster-card">
-          <div class="roster-top">${avatar(p, 'avatar-lg')}<div style="min-width:0;flex:1"><h3>${esc(p.name)}</h3><span class="muted" style="font-size:.8rem;font-weight:700">${s.lastPlayed ? `Last played ${esc(ago(s.lastPlayed))}` : 'Yet to play'}</span></div>
-            ${canEdit() ? `<button type="button" class="btn btn-ghost btn-small" data-action="edit-player" data-pid="${esc(p.id)}">Edit</button>` : ''}</div>
+          <div class="roster-top">${avatar(p, 'avatar-lg')}<div style="min-width:0;flex:1"><h3>${esc(p.name)} ${playerTag(p)}</h3><span class="muted" style="font-size:.8rem;font-weight:700">${s.lastPlayed ? `Last played ${esc(ago(s.lastPlayed))}` : 'Yet to play'}</span></div>
+            ${canEditPlayer(p) ? `<button type="button" class="btn btn-ghost btn-small" data-action="edit-player" data-pid="${esc(p.id)}">Edit</button>` : ''}</div>
           <div class="roster-stats"><div><strong>${s.wins}</strong><small>Wins</small></div><div><strong>${s.games}</strong><small>Games</small></div><div><strong>${s.roundsWon}</strong><small>Rounds won</small></div></div>
         </article>`;
       })
       .join('');
-    return `<section class="game-head"><div class="game-title"><span class="eyebrow">${plural(state.players.length, 'player')} saved</span><h1>Players</h1><p class="muted">${canEdit() ? 'Everyone saved here can be tapped into a new game.' : 'Everyone who has a seat at this table.'}</p></div></section>
-      <section class="panel" ${canEdit() ? '' : 'hidden'}><form class="add-inline" id="roster-add"><input type="text" id="roster-new" class="text-input" placeholder="New player name" maxlength="24" aria-label="New player name" autocomplete="off"><button type="submit" class="btn btn-red">Add player</button></form></section>
+    return `<section class="game-head"><div class="game-title"><span class="eyebrow">${plural(state.players.length, 'player')} saved</span><h1>Players</h1><p class="muted">${canManage() ? 'Friends appear here once they sign in and pick a username. Guests are players without a Claude account.' : 'Everyone who has a seat at this table.'}</p></div></section>
+      <section class="panel" ${canManage() ? '' : 'hidden'}><form class="add-inline" id="roster-add"><input type="text" id="roster-new" class="text-input" placeholder="Guest name (no Claude account)" maxlength="24" aria-label="Guest player name" autocomplete="off"><button type="submit" class="btn btn-red">Add guest</button></form></section>
       ${state.players.length ? `<section class="roster">${cards}</section>` : ''}`;
   }
 
@@ -826,6 +842,10 @@
           const save = () => {
             const nm = $('#pe-name', m).value.trim();
             if (!nm) return $('#pe-name', m).focus();
+            if (p.account) {
+              const problem = usernameProblem(nm, p.id);
+              if (problem) return toast(problem);
+            }
             p.name = nm.slice(0, 24);
             closeModal();
             commit((s) => (s.players = s.players.map((x) => (x.id === p.id ? p : x))));
@@ -834,6 +854,7 @@
           $('#pe-save', m).addEventListener('click', save);
           $('#pe-name', m).addEventListener('keydown', (e) => e.key === 'Enter' && save());
           $('#pe-delete', m).addEventListener('click', () => {
+            if (p.account && !isAdmin()) return toast('Players with a username can only be removed by the page owner.');
             if (inGames) return toast(`${p.name} has played games, so they stay to keep old scores right. You can rename them.`);
             closeModal();
             commit((s) => (s.players = s.players.filter((x) => x.id !== pid)));
@@ -955,6 +976,110 @@
     });
   }
 
+  /* ---------------------------------------------------------------- identity */
+  const playerTag = (p) => (p.id === me ? '<span class="pick-tag">you</span>' : p.account ? '' : '<span class="pick-tag">guest</span>');
+  const canEditPlayer = (p) => isAdmin() || (ready() && (p.id === me || !p.account));
+
+  function readClaim() {
+    try {
+      return localStorage.getItem(CLAIM_KEY);
+    } catch (e) {
+      return null;
+    }
+  }
+  function writeClaim(pid) {
+    try {
+      localStorage.setItem(CLAIM_KEY, pid);
+    } catch (e) {}
+  }
+
+  /** The player this viewer plays as: matched by Claude account, else by this device's earlier choice. */
+  function resolveMe() {
+    if (role !== 'editor') return null;
+    if (accountId) {
+      const p = state.players.find((x) => x.account && x.accountId === accountId);
+      if (p) return p.id;
+    }
+    const claimed = readClaim();
+    const p = claimed && state.players.find((x) => x.id === claimed && x.account && (!x.accountId || x.accountId === accountId));
+    return p ? p.id : null;
+  }
+
+  function guardGame() {
+    if (canEditGame(currentGame())) return true;
+    toast('Only the players in this game can change its scores.');
+    return false;
+  }
+
+  function usernameProblem(nm, exceptId) {
+    if (nm.length < 2 || nm.length > 20) return 'Use 2 to 20 characters.';
+    if (!/^[\p{L}\p{N}_. -]+$/u.test(nm)) return 'Use letters, numbers, spaces, dots, dashes or underscores.';
+    const clash = state.players.find((p) => p.account && p.id !== exceptId && p.name.toLowerCase() === nm.toLowerCase());
+    return clash ? 'That username is taken. Pick another one.' : null;
+  }
+
+  /** Required for everyone who can keep score: pick a username (or reclaim yours). */
+  function openGate() {
+    const claimable = state.players.filter((p) => p.account && !p.accountId);
+    openModal(
+      `<div class="modal-head"><div><span class="eyebrow">Welcome to the table</span><h2 style="margin-top:6px">Pick your username</h2>
+        <p class="muted" style="margin-top:6px">You need one to keep score. It’s how your friends see you on the scoreboard, and it lets you change the scores of games you play in.</p></div></div>
+      <form id="gate-form" class="field">
+        <span>Username</span>
+        <div class="add-inline"><input type="text" id="gate-name" class="text-input" maxlength="20" placeholder="e.g. Derrick" autocomplete="nickname" autofocus><button type="submit" class="btn btn-red">Join</button></div>
+        <p class="entry-hint" id="gate-error" role="alert"></p>
+      </form>
+      ${
+        claimable.length
+          ? `<div class="field"><span>Already picked one on another device? Tap it.</span><div class="chips">${claimable
+              .map((p) => `<button type="button" class="chip pc-${esc(p.color)}" data-action="claim-player" data-pid="${esc(p.id)}">${avatar(p)}<span>${esc(p.name)}</span></button>`)
+              .join('')}</div></div>`
+          : ''
+      }`,
+      {
+        label: 'Pick your username',
+        locked: true,
+        onMount: (m) => {
+          $('#gate-form', m).addEventListener('submit', (e) => {
+            e.preventDefault();
+            const nm = $('#gate-name', m).value.trim().replace(/\s+/g, ' ');
+            const problem = usernameProblem(nm);
+            if (problem) {
+              $('#gate-error', m).textContent = problem;
+              return $('#gate-name', m).focus();
+            }
+            if (state.isDemo) state = S.emptyState();
+            // A guest with the same name becomes this account, keeping their stats.
+            const guest = state.players.find((p) => !p.account && p.name.toLowerCase() === nm.toLowerCase());
+            const p = guest ? { ...guest, name: nm } : newPlayer(nm);
+            p.account = true;
+            p.accountId = accountId;
+            writeClaim(p.id);
+            closeModal();
+            commit((st) => {
+              if (guest) st.players = st.players.map((x) => (x.id === p.id ? p : x));
+              else st.players.push(p);
+            });
+            toast(`Welcome, ${nm}!`);
+          });
+        },
+      }
+    );
+  }
+
+  function claimPlayer(pid) {
+    const p = byId()[pid];
+    if (!p || !p.account || (p.accountId && p.accountId !== accountId)) return;
+    writeClaim(pid);
+    closeModal();
+    if (accountId && !p.accountId) {
+      commit((st) => (st.players = st.players.map((x) => (x.id === pid ? { ...x, accountId } : x))));
+    } else {
+      render();
+    }
+    toast(`Welcome back, ${p.name}!`);
+  }
+
   /* -------------------------------------------------------------- page frame */
   function mountShell() {
     document.body.insertAdjacentHTML(
@@ -1052,7 +1177,7 @@
       renderSync();
       FX.sound('click');
     },
-    backup: openBackup,
+    backup: () => isAdmin() && openBackup(),
     'clear-demo': () =>
       confirmModal({
         title: 'Clear the demo?',
@@ -1069,6 +1194,7 @@
       }),
     'toggle-pick': (el) => {
       const s = ensureSetup();
+      if (el.dataset.pid === me && !isAdmin() && s.sel.has(me)) return toast('You’re keeping score, so you’re in this game.');
       s.sel.has(el.dataset.pid) ? s.sel.delete(el.dataset.pid) : s.sel.add(el.dataset.pid);
       FX.sound('click');
       render();
@@ -1083,6 +1209,7 @@
     },
     'start-game': () => {
       const s = ensureSetup();
+      if (me && !isAdmin()) s.sel.add(me);
       const ids = state.players.filter((p) => s.sel.has(p.id)).map((p) => p.id);
       if (ids.length < 2) return toast('Pick at least 2 players.');
       startGame(ids, { name: (s.name || '').trim(), mode: s.mode, target: s.target });
@@ -1099,7 +1226,7 @@
     'play-again': (el) => {
       const g = findGame(el.dataset.game);
       closeModal();
-      if (!g) return;
+      if (!g || !canEditGame(g)) return;
       startGame(g.playerIds.filter((id) => byId()[id]), { mode: g.mode, target: g.target });
       toast('Rematch! Same players, fresh deck.');
     },
@@ -1112,7 +1239,7 @@
     },
     'delete-game': (el) => {
       const g = findGame(el.dataset.game);
-      if (!g) return;
+      if (!g || !(isAdmin() || inGame(g))) return;
       confirmModal({
         title: `Delete “${g.name}”?`,
         body: `This removes ${plural(g.rounds.length, 'round')} and their stats for good.`,
@@ -1124,12 +1251,13 @@
           }),
       });
     },
-    'submit-round': submitRound,
+    'submit-round': () => guardGame() && submitRound(),
     'cancel-edit': () => {
       draft = null;
       render();
     },
     'edit-round': (el) => {
+      if (!guardGame()) return;
       const g = currentGame();
       const r = g && g.rounds.find((x) => x.id === el.dataset.round);
       if (!r) return;
@@ -1138,8 +1266,9 @@
       const panel = $('#entry-panel');
       panel && panel.scrollIntoView({ behavior: FX.reduced() ? 'auto' : 'smooth', block: 'start' });
     },
-    'delete-round': (el) => deleteRound(el.dataset.round),
+    'delete-round': (el) => guardGame() && deleteRound(el.dataset.round),
     'finish-game': () => {
+      if (!guardGame()) return;
       const g = currentGame();
       if (!g || !g.rounds.length) return;
       const top = L.standings(g)[0];
@@ -1152,8 +1281,9 @@
         onOk: () => finishGame(g, top.id),
       });
     },
-    'add-to-game': openAddToGame,
-    'edit-player': (el) => openPlayerEditor(el.dataset.pid),
+    'add-to-game': () => guardGame() && openAddToGame(),
+    'claim-player': (el) => claimPlayer(el.dataset.pid),
+    'edit-player': (el) => canEditPlayer(byId()[el.dataset.pid] || {}) && openPlayerEditor(el.dataset.pid),
   };
 
   document.addEventListener('click', (e) => {
@@ -1183,6 +1313,8 @@
         let editor = false;
         try {
           editor = !!(user && art && (await user.canEdit()));
+          isOwnerView = !!(user && (await user.isOwner()));
+          accountId = (user && (await user.id())) || null;
         } catch (e) {}
         artifactApi = art;
         role = editor ? 'editor' : 'viewer';
