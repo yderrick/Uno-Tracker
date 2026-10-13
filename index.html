@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Uno Tracker</title>
-<meta name="description" content="Score keeper, dashboards and live commentary for Uno game nights.">
+<meta name="description" content="Simple score keeper for Uno game nights.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Figtree:wght@400;500;600;700;800&display=swap">
@@ -18,16 +18,13 @@
       <span class="brand-word">Tracker</span>
     </button>
     <nav class="tabs" aria-label="Sections">
-      <button type="button" class="tab c-red" data-action="go" data-view="play"><span class="tab-glyph">▶</span>Play</button>
-      <button type="button" class="tab c-yellow" data-action="go" data-view="stats"><span class="tab-glyph">▤</span>Stats</button>
-      <button type="button" class="tab c-green" data-action="go" data-view="fame"><span class="tab-glyph">★</span>Hall of Fame</button>
-      <button type="button" class="tab c-blue" data-action="go" data-view="history"><span class="tab-glyph">↺</span>History</button>
-      <button type="button" class="tab c-wild" data-action="go" data-view="players"><span class="tab-glyph">☺</span>Players</button>
+      <button type="button" class="tab c-red" data-action="go" data-view="play"><span class="tab-glyph">▶</span>Game</button>
+      <button type="button" class="tab c-yellow" data-action="go" data-view="stats"><span class="tab-glyph">★</span>Stats</button>
+      <button type="button" class="tab c-green" data-action="go" data-view="players"><span class="tab-glyph">☺</span>Players</button>
     </nav>
     <div class="top-actions">
       <span id="sync-chip" class="sync-chip" title="Where your scores are saved">Saved on this device</span>
       <button type="button" class="icon-btn" id="mute-btn" data-action="mute" aria-label="Toggle sound">🔊</button>
-      <button type="button" class="icon-btn" data-action="rules" aria-label="Scoring rules">?</button>
       <button type="button" class="icon-btn" data-action="backup" aria-label="Back up or restore data">⇅</button>
     </div>
   </div>

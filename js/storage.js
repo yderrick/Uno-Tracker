@@ -26,7 +26,7 @@
       ...base,
       ...s,
       players: Array.isArray(s.players) ? s.players : [],
-      games: Array.isArray(s.games) ? s.games.map((g) => ({ rounds: [], playerIds: [], ...g })) : [],
+      games: Array.isArray(s.games) ? s.games.map((g) => window.UnoLogic.normaliseGame(g)) : [],
     };
   }
 
