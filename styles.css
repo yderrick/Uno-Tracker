@@ -671,6 +671,9 @@ tfoot td { font: 400 1.1rem/1 var(--f-display); background: var(--surface-2); bo
 .toast { background: var(--card-ink); color: #fff; padding: 11px 16px; border-radius: 14px; font-weight: 700; box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.6); animation: rise 0.25s; pointer-events: auto; display: flex; gap: 10px; align-items: center; justify-content: space-between; }
 .toast button { background: var(--yellow); color: var(--card-ink); border: 0; border-radius: 8px; padding: 4px 10px; font-weight: 800; }
 
+.saving { position: fixed; inset: 0; z-index: 75; display: grid; place-items: center; background: color-mix(in srgb, var(--bg) 45%, transparent); }
+.saving span { background: var(--card-ink); color: #fff; font-weight: 800; padding: 12px 18px; border-radius: 999px; box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.6); }
+
 #fx { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 70; }
 
 .foot { padding-block: 10px 30px; color: var(--muted); font-size: 0.78rem; font-weight: 600; text-align: center; }

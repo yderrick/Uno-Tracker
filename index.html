@@ -11,46 +11,13 @@
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<header class="topbar">
-  <div class="topbar-inner">
-    <button class="brand" type="button" data-action="go" data-view="play" aria-label="Uno Tracker home">
-      <span class="logo-oval"><span>UNO</span></span>
-      <span class="brand-word">Tracker</span>
-    </button>
-    <nav class="tabs" aria-label="Sections">
-      <button type="button" class="tab c-red" data-action="go" data-view="play"><span class="tab-glyph">▶</span>Game</button>
-      <button type="button" class="tab c-yellow" data-action="go" data-view="stats"><span class="tab-glyph">★</span>Stats</button>
-      <button type="button" class="tab c-green" data-action="go" data-view="players"><span class="tab-glyph">☺</span>Players</button>
-    </nav>
-    <div class="top-actions">
-      <span id="sync-chip" class="sync-chip" title="Where your scores are saved">Saved on this device</span>
-      <button type="button" class="icon-btn" id="mute-btn" data-action="mute" aria-label="Toggle sound">🔊</button>
-      <button type="button" class="icon-btn" data-action="backup" aria-label="Back up or restore data">⇅</button>
-    </div>
-  </div>
-</header>
-
-<div id="demo-banner" class="demo-banner" hidden>
-  <span><strong>Demo game night.</strong> These players and scores are examples so you can see the dashboards.</span>
-  <button type="button" class="btn btn-small btn-ink" data-action="clear-demo">Clear demo and start fresh</button>
-</div>
-
-<main id="view" class="wrap" tabindex="-1"></main>
-
-<footer class="foot wrap">
-  <span>Card values: numbers = face value · Skip, Reverse, Draw Two = 20 · Wild, Wild Draw Four = 50 · Shuffle Hands, Customizable = 40</span>
-</footer>
-
-<div id="modal-root"></div>
-<div id="toast-root" class="toast-root" aria-live="polite"></div>
-<canvas id="fx" aria-hidden="true"></canvas>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="js/logic.js"></script>
 <script src="js/storage.js"></script>
 <script src="js/fx.js"></script>
 <script src="js/demo.js"></script>
 <script src="js/charts.js"></script>
+<script src="js/page.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

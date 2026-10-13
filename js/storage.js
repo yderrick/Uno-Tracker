@@ -1,23 +1,16 @@
-/* Uno Tracker — persistence.
-   Always keeps a copy in this browser (localStorage). When the page runs inside a
-   claude.ai Artifact with the `db` capability, it also syncs to a shared store so
-   every phone at the table sees the same scoreboard live. */
+/* Uno Tracker — where the scores live.
+
+   Opened as a file or from any web host, scores are kept in this browser (localStorage).
+   Hosted as a claude.ai Artifact, the scores are written into the page itself: the
+   scorekeeper's changes publish a new version of the page, and everyone with the link,
+   signed in or not, sees the new scores. See js/page.js for the page template. */
 (function () {
   'use strict';
 
   const KEY = 'uno-tracker:v1';
-  const ROSTER_DOC = 'tracker/roster';
-  const GAMES = 'games';
+  const UI_KEY = 'uno-tracker:ui';
 
-  const listeners = new Set();
-  let mode = 'local'; // 'local' | 'cloud' | 'readonly'
-  let db = null;
-  const written = new Map(); // doc path -> last JSON we wrote or received
-  let writeChain = Promise.resolve();
-  let pending = null;
-  let timer = null;
-
-  const emptyState = () => ({ version: 1, players: [], games: [], activeGameId: null, isDemo: false });
+  const emptyState = () => ({ version: 2, players: [], games: [], activeGameId: null, isDemo: false });
 
   function normalise(s) {
     const base = emptyState();
@@ -48,129 +41,45 @@
     }
   }
 
-  const rosterBody = (s) => ({ players: s.players, activeGameId: s.activeGameId || null, isDemo: !!s.isDemo, version: 1 });
-
-  function queueCloud(state) {
-    pending = state;
-    clearTimeout(timer);
-    timer = setTimeout(flushCloud, 350);
-  }
-
-  function flushCloud() {
-    if (!db || mode !== 'cloud' || !pending) return;
-    const s = pending;
-    pending = null;
-    const jobs = [];
-    const roster = rosterBody(s);
-    const rj = JSON.stringify(roster);
-    if (written.get(ROSTER_DOC) !== rj) jobs.push([ROSTER_DOC, roster]);
-    const live = new Set();
-    s.games.forEach((g) => {
-      const path = `${GAMES}/${g.id}`;
-      live.add(path);
-      const gj = JSON.stringify(g);
-      if (written.get(path) !== gj) jobs.push([path, g]);
-    });
-    [...written.keys()].forEach((path) => {
-      if (path.startsWith(GAMES + '/') && !live.has(path)) jobs.push([path, null]);
-    });
-    jobs.forEach(([path, body]) => {
-      written.set(path, body ? JSON.stringify(body) : undefined);
-      if (!body) written.delete(path);
-      writeChain = writeChain
-        .then(() => (body ? db.doc(path).set(JSON.parse(JSON.stringify(body))) : db.doc(path).delete()))
-        .catch((e) => {
-          if (e && (e.code === 'invalid_argument' || e.code === 'not_granted')) {
-            mode = 'readonly';
-            emit('mode');
-          } else if (e && e.code === 'quota_exceeded') {
-            emit('error', 'The shared store is full. Delete a few old games from History to free space.');
-          } else {
-            emit('error', 'Could not sync that change. It is still saved on this device.');
-          }
-        });
-    });
-  }
-
-  function emit(type, payload) {
-    listeners.forEach((fn) => {
-      try {
-        fn(type, payload);
-      } catch (e) {
-        console.error(e);
-      }
-    });
-  }
-
-  /** Subscribe to the shared store. Resolves true if cloud sync is active. */
-  async function connectCloud() {
-    if (!window.claude || typeof window.claude.use !== 'function') return false;
+  /** Scores written into the page (the single-file build). null when there are none. */
+  function embedded() {
+    const el = document.getElementById('uno-data');
+    if (!el) return null;
     try {
-      db = await window.claude.use('db');
+      const text = el.textContent.trim();
+      return text ? normalise(JSON.parse(text)) : null;
     } catch (e) {
-      db = null;
+      return null;
     }
-    if (!db) return false;
-
-    let roster;
-    let games;
-    let gotRoster = false;
-    let gotGames = false;
-    const publish = (initial) => {
-      if (!gotRoster || !gotGames || pending) return;
-      if (!roster && !games.length) {
-        if (initial) emit('cloud-empty');
-        return;
-      }
-      const state = normalise({ ...(roster || {}), games: games.slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)) });
-      saveLocal(state);
-      emit('remote', state);
-    };
-    let first = true;
-    db.doc(ROSTER_DOC).onSnapshot(
-      (snap) => {
-        if (snap.metadata && snap.metadata.hasPendingWrites) return;
-        roster = snap.exists ? snap.data() : null;
-        if (roster) written.set(ROSTER_DOC, JSON.stringify(rosterBody(normalise(roster))));
-        gotRoster = true;
-        publish(first);
-        if (gotGames) first = false;
-      },
-      () => {}
-    );
-    db.collection(GAMES).onSnapshot(
-      (snap) => {
-        if (snap.metadata && snap.metadata.hasPendingWrites) return;
-        games = snap.docs.map((d) => d.data());
-        [...written.keys()].forEach((k) => k.startsWith(GAMES + '/') && written.delete(k));
-        games.forEach((g) => written.set(`${GAMES}/${g.id}`, JSON.stringify(g)));
-        gotGames = true;
-        publish(first);
-        if (gotRoster) first = false;
-      },
-      () => {}
-    );
-    mode = 'cloud';
-    emit('mode');
-    return true;
   }
 
-  window.UnoStore = {
-    emptyState,
-    normalise,
-    load: () => loadLocal(),
-    save(state) {
-      const ok = saveLocal(state);
-      if (mode === 'cloud') queueCloud(state);
-      return ok || mode === 'cloud';
-    },
-    connectCloud,
-    get mode() {
-      return mode;
-    },
-    on(fn) {
-      listeners.add(fn);
-      return () => listeners.delete(fn);
-    },
-  };
+  /** The page's own CSS and JS, present only in the single-file build. */
+  function source() {
+    const css = document.getElementById('uno-css');
+    const js = document.getElementById('uno-js');
+    return css && js ? { css: css.textContent, js: js.textContent } : null;
+  }
+
+  /** The reset stylesheet the Artifact host puts in <head>, so a republish keeps it. */
+  function hostReset() {
+    const el = document.head && document.head.querySelector('style');
+    return el ? el.textContent : null;
+  }
+
+  /** Per-tab UI state that survives the reload a publish triggers. */
+  function stashUi(ui) {
+    try {
+      sessionStorage.setItem(UI_KEY, JSON.stringify({ ...ui, at: Date.now() }));
+    } catch (e) {}
+  }
+  function readUi() {
+    try {
+      const ui = JSON.parse(sessionStorage.getItem(UI_KEY) || 'null');
+      return ui && Date.now() - ui.at < 30 * 60000 ? ui : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  window.UnoStore = { emptyState, normalise, loadLocal, saveLocal, embedded, source, hostReset, stashUi, readUi };
 })();

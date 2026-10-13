@@ -15,13 +15,16 @@ Along the way, the scoreboard shows each player as an Uno card with their rank a
 
 **Stats**: all-time leaderboard, trophies (Champion, Round Machine, Big Round, Hot Streak and more), a score race chart for any game, and every past game to reopen or delete.
 
-## Saving your scores
+## Saving and sharing scores
 
-- Everything saves automatically in your browser (`localStorage`), so it is still there next time you open the page on the same device.
-- Use **⇅ Back up & restore** to download a JSON backup, copy it to the clipboard, or restore from a file or pasted text. That is also how you move scores to another device.
-- When the page runs as a hosted claude.ai Artifact, scores also sync to a shared store, so everyone who opens the tracker sees the same scoreboard update live. The header shows "● Live sync on" when that is active. In that mode a "🎙 Hot take" button can also generate fresh commentary.
+**On the hosted page (claude.ai):** the scores are saved inside the page itself. Whenever the scorekeeper adds a round, the page saves a new version and every open copy refreshes by itself, so the whole table follows along live.
 
-On first launch the tracker shows a clearly marked demo game night so the dashboards have something to show. Use **Clear demo and start fresh** to begin your own.
+- **Scorekeeper:** the page's owner, plus anyone invited as an Editor, can add players, start games and enter scores. Their header says "● Scorekeeper".
+- **Everyone else:** anyone with a public link can watch the scoreboard, stats and players, no Claude account needed. Their header says "👀 Watching live", and the editing buttons are hidden.
+
+**Opened as a file or from any other website:** scores are saved in that browser (`localStorage`). Use **⇅ Back up & restore** to download a backup or move scores to another device.
+
+On first launch the scorekeeper sees a clearly marked demo game night. Use **Clear demo and start fresh** to begin your own. The demo is never shown to people who are only watching.
 
 ## Files
 
@@ -30,12 +33,14 @@ On first launch the tracker shows a clearly marked demo game night so the dashbo
 | `index.html` | Page shell |
 | `styles.css` | All styling, with light and dark themes |
 | `js/logic.js` | Totals, standings, stats, awards and commentary (pure functions, no DOM) |
-| `js/storage.js` | Browser storage plus optional live sync |
+| `js/storage.js` | Browser storage, and reading scores saved inside the page |
+| `js/page.js` | Template for the single-file page that carries its own scores |
 | `js/app.js` | Views and interactions |
 | `js/charts.js` | Score race chart |
 | `js/fx.js` | Confetti and sound effects |
 | `js/demo.js` | Seeded demo data |
-| `tests/logic.test.js` | Unit tests for the scoring logic |
+| `scripts/build.js` | Builds the single-file page (`node scripts/build.js out.html --full`) |
+| `tests/logic.test.js` | Unit tests for the scoring logic and page template |
 
 Charts use [Chart.js](https://www.chartjs.org/) 4.4.1 from cdnjs and fonts come from Google Fonts. Offline, everything else still works and the chart shows a short note instead.
 

@@ -27,15 +27,22 @@
     'Revenge of the Reverse',
   ];
 
-  let state = S.load() || window.UnoDemo.build(L);
+  // Where scores live: 'local' (this browser), or on a hosted page 'editor' (can publish
+  // new scores into the page), 'viewer' (watches) and 'checking' (not known yet).
+  const SOURCE = S.source();
+  const HOSTED = !!(SOURCE && window.claude && typeof window.claude.use === 'function');
+  const EMBEDDED = S.embedded();
+  let role = HOSTED ? 'checking' : 'local';
+  let state = HOSTED ? EMBEDDED || S.emptyState() : S.loadLocal() || EMBEDDED || window.UnoDemo.build(L);
+  let artifactApi = null;
+  let publishTimer = null;
+  let loadedSeen = null;
   let view = 'play';
   let draft = null; // { gameId, editingId, points }
   let setup = null; // { sel: Set, mode, target, name, open }
   let statsGameId = null;
   let justScored = null;
   let dealtFor = null;
-  let sample = null;
-  let downloads = null;
 
   /* ------------------------------------------------------------------ helpers */
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -50,6 +57,7 @@
   const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
   const listJoin = (a) => (a.length <= 1 ? a.join('') : `${a.slice(0, -1).join(', ')} and ${a[a.length - 1]}`);
   const ruleText = (g) => `${L.higherWins(g) ? 'Highest' : 'Lowest'} score wins${g.target ? ` · ${L.higherWins(g) ? 'first to' : 'ends at'} ${g.target}` : ''}`;
+  const canEdit = () => role === 'local' || role === 'editor';
   const isEditing = (g) => !!(g && draft && draft.gameId === g.id && draft.editingId);
 
   function ago(ts) {
@@ -65,9 +73,69 @@
   const avatar = (p, cls = '') => `<span class="avatar pc-${esc((p && p.color) || 'ink')} ${cls}">${esc((p && p.emoji) || '❔')}</span>`;
 
   function commit(mutate, opts = {}) {
+    if (!canEdit()) return toast('This scoreboard is view only.');
     mutate(state);
-    if (!S.save(state)) toast('Could not save on this device. Use Back up to keep a copy.');
+    if (role === 'local') {
+      if (!S.saveLocal(state)) toast('Could not save on this device. Use Back up to keep a copy.');
+    } else {
+      schedulePublish();
+    }
     if (opts.render !== false) render();
+  }
+
+  /* ---------------------------------------------- publishing (hosted page) */
+  const seenOf = (st) => {
+    const g = st.games.find((x) => x.id === st.activeGameId);
+    return g ? { gameId: g.id, rounds: g.rounds.length, status: g.status } : null;
+  };
+
+  function stash(extra = {}) {
+    S.stashUi({
+      view,
+      statsGameId,
+      setup: setup && { ...setup, sel: [...setup.sel] },
+      draft,
+      scrollY: window.scrollY,
+      seen: loadedSeen,
+      ...extra,
+    });
+  }
+
+  function setSaving(on) {
+    const el = $('#saving');
+    if (el) el.hidden = !on;
+  }
+
+  function schedulePublish() {
+    clearTimeout(publishTimer);
+    publishTimer = setTimeout(publishNow, 900);
+    renderSync('Saving…');
+  }
+
+  async function publishNow() {
+    if (!artifactApi) return;
+    stash();
+    setSaving(true);
+    try {
+      await artifactApi.publish(window.UnoPage.documentHtml({ ...SOURCE, data: state, reset: S.hostReset() }));
+      // Every open view, this one included, now reloads to the new version.
+      setTimeout(() => setSaving(false), 12000);
+    } catch (e) {
+      setSaving(false);
+      const code = e && e.code;
+      if (code === 'conflict') {
+        stash({ flash: 'Someone else saved at the same moment. Check the last round and enter it again if it is missing.' });
+        return;
+      }
+      if (['not_writer', 'not_granted', 'not_declared', 'consent_required', 'capability_disabled', 'capability_removed'].includes(code)) {
+        role = 'viewer';
+        render();
+        return toast('You can watch this scoreboard, but only the scorekeeper can change it.');
+      }
+      if (code === 'too_large') return toast('The scoreboard is full. Delete a few old games in Stats.');
+      toast(code === 'rate_limited' ? 'Saving is busy. Trying again in a few seconds…' : 'Could not save. Trying again…');
+      publishTimer = setTimeout(publishNow, code === 'rate_limited' ? 6000 : 3000);
+    }
   }
 
   function newPlayer(name) {
@@ -147,7 +215,7 @@
   function render() {
     C.destroyAll();
     $$('.tab').forEach((t) => (t.dataset.view === view ? t.setAttribute('aria-current', 'page') : t.removeAttribute('aria-current')));
-    $('#demo-banner').hidden = !state.isDemo;
+    $('#demo-banner').hidden = !(state.isDemo && canEdit());
     renderSync();
     const views = { play: renderPlay, stats: renderStats, players: renderPlayers };
     $('#view').innerHTML = (views[view] || renderPlay)();
@@ -156,18 +224,39 @@
     justScored = null;
   }
 
-  function renderSync() {
+  function renderSync(override) {
     const chip = $('#sync-chip');
-    chip.classList.toggle('is-cloud', S.mode === 'cloud');
-    chip.classList.toggle('is-readonly', S.mode === 'readonly');
-    chip.textContent = S.mode === 'cloud' ? '● Live sync on' : S.mode === 'readonly' ? 'View only' : 'Saved on this device';
+    const text = {
+      local: 'Saved on this device',
+      checking: 'Connecting…',
+      viewer: '👀 Watching live',
+      editor: '● Scorekeeper',
+    }[role];
+    chip.classList.toggle('is-cloud', role === 'editor');
+    chip.textContent = override || text;
+    chip.title =
+      role === 'viewer'
+        ? 'Scores update by themselves when the scorekeeper adds a round'
+        : role === 'editor'
+          ? 'Your changes are saved for everyone with the link'
+          : 'Scores are saved in this browser';
     $('#mute-btn').textContent = FX.muted ? '🔇' : '🔊';
+    $('#backup-btn').hidden = !canEdit();
   }
 
   /* ---------------------------------------------------------------- GAME TAB */
   function renderPlay() {
     const g = currentGame();
-    return g ? renderGame(g) : renderSetup();
+    if (g) return renderGame(g);
+    return canEdit() ? renderSetup() : renderWaiting();
+  }
+
+  function renderWaiting() {
+    const recent = [...state.games].sort((a, b) => b.createdAt - a.createdAt).slice(0, 4);
+    const P = byId();
+    return `<section class="game-head"><div class="game-title"><span class="eyebrow">${role === 'checking' ? 'Loading' : 'Watching live'}</span><h1>No game right now</h1>
+        <p class="muted">When the scorekeeper starts a game, the scoreboard shows up here by itself.</p></div></section>
+      ${recent.length ? `<section class="panel"><div class="panel-head"><h2><span class="pip pip-blue"></span>Recent games</h2></div><div class="games">${recent.map((g) => gameCard(g, P)).join('')}</div></section>` : ''}`;
   }
 
   function ensureSetup() {
@@ -285,9 +374,10 @@
           <div class="game-meta">
             ${finished ? `<span class="pill pill-done">🏆 ${esc(P[g.winnerId] ? P[g.winnerId].name : '')} won</span>` : '<span class="pill pill-live">Live</span>'}
             <span class="pill">${esc(ruleText(g))}</span>
+            ${role === 'viewer' && !finished ? '<span class="pill">👀 Updates by itself</span>' : ''}
           </div>
         </div>
-        <div class="btn-row">
+        <div class="btn-row" ${canEdit() ? '' : 'hidden'}>
           ${
             finished
               ? `<button type="button" class="btn btn-ghost" data-action="new-game">New game</button>`
@@ -297,10 +387,14 @@
         </div>
       </section>
       <section class="board" aria-label="Scoreboard">${cards}</section>
-      <div class="grid-2">
-        <section class="panel" id="entry-panel">${!finished || isEditing(g) ? renderEntry(g) : renderFinishedPanel(g)}</section>
+      ${
+        canEdit() || finished
+          ? `<div class="grid-2">
+        <section class="panel" id="entry-panel">${canEdit() && (!finished || isEditing(g)) ? renderEntry(g) : renderFinishedPanel(g)}</section>
         <section class="panel">${renderFeed(g)}</section>
-      </div>
+      </div>`
+          : `<section class="panel">${renderFeed(g)}</section>`
+      }
       ${g.rounds.length ? `<section class="panel">${renderScorecard(g)}</section>` : ''}`;
   }
 
@@ -380,6 +474,7 @@
     justScored = points;
     draft = null;
     render();
+    if (role !== 'local') return; // the hosted page reloads after saving and celebrates then
     FX.sound('round');
     const g2 = currentGame();
     const wId = g2.rounds[editIdx >= 0 ? editIdx : g2.rounds.length - 1].winnerId;
@@ -456,47 +551,8 @@
     items.push(
       `<div class="feed-item"><span class="feed-badge" style="background:var(--green)">🃏</span><div class="feed-body"><p class="feed-line">Cards are dealt! ${esc(listJoin(g.playerIds.map((id) => (P[id] ? P[id].name : '?'))))} take their seats.</p><span class="feed-when">${esc(ago(g.createdAt))}</span></div></div>`
     );
-    return `<div class="panel-head"><h2><span class="pip pip-yellow"></span>Play-by-play</h2>
-        ${sample && g.rounds.length ? `<button type="button" class="btn btn-ink btn-small" data-action="ai-take" id="ai-btn">🎙 Hot take</button>` : ''}</div>
+    return `<div class="panel-head"><h2><span class="pip pip-yellow"></span>Play-by-play</h2></div>
       <div class="feed">${items.join('')}</div>`;
-  }
-
-  async function aiTake() {
-    const g = currentGame();
-    if (!g || !sample) return;
-    const btn = $('#ai-btn');
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = '🎙 Thinking…';
-    }
-    const P = byId();
-    const nm = (id) => (P[id] ? P[id].name : '?');
-    const st = L.standings(g).map((r) => `${r.rank}. ${nm(r.id)}: ${r.total} pts, ${r.roundsWon} rounds won`).join('\n');
-    const recent = g.rounds
-      .slice(-5)
-      .map((r, i, arr) => `Round ${g.rounds.length - arr.length + i + 1}: ${Object.entries(r.points || {}).map(([id, p]) => `${nm(id)} ${p}`).join(', ')}`)
-      .join('\n');
-    const prompt = `You are a hyped-up, good-natured sports commentator calling a family game of Uno.
-Game: "${g.name}". ${ruleText(g)}. Status: ${g.status}. Rounds played: ${g.rounds.length}.
-Standings:
-${st}
-Recent round scores:
-${recent}
-Write ONE hot take of at most 2 short sentences (under 45 words). Be playful and specific to these players and numbers, tease gently, no hashtags. Reply with the commentary text only.`;
-    try {
-      const res = await sample(prompt, { modelTier: 'quick', cache: false });
-      const text = String((res && res.text) || '').trim().replace(/^["“]|["”]$/g, '');
-      if (!text) throw new Error('empty');
-      commit((s) => {
-        const game = s.games.find((x) => x.id === g.id);
-        game.aiNotes = [...(game.aiNotes || []), { after: game.rounds.length, at: Date.now(), text: text.slice(0, 400) }].slice(-40);
-      });
-      FX.sound('uno');
-    } catch (e) {
-      if (e && e.code === 'not_granted') sample = null;
-      toast(e && e.code === 'rate_limited' ? 'The commentator needs a breather. Try again in a minute.' : 'No hot take this time. Try again in a moment.');
-      render();
-    }
   }
 
   /* -------------------------------------------------------------- scorecard */
@@ -516,12 +572,13 @@ Write ONE hot take of at most 2 short sentences (under 45 words). Be playful and
             return `<td>${star}<span class="cell-heat pc-${esc(P[id] ? P[id].color : 'ink')}" style="background:color-mix(in srgb, var(--pc) ${heat}%, transparent)">${v}</span></td>`;
           })
           .join('');
+        if (!canEdit()) return `<tr><th scope="row" style="text-align:left">R${i + 1}</th>${cells}</tr>`;
         return `<tr><th scope="row" style="text-align:left">R${i + 1}</th>${cells}<td><span class="row-actions"><button type="button" data-action="edit-round" data-round="${esc(r.id)}" aria-label="Edit round ${i + 1}" title="Edit">✎</button><button type="button" data-action="delete-round" data-round="${esc(r.id)}" aria-label="Delete round ${i + 1}" title="Delete">✕</button></span></td></tr>`;
       })
       .join('');
-    return `<div class="panel-head"><h2><span class="pip pip-green"></span>Scorecard</h2><span class="entry-hint">★ round winner · ✎ to fix a round</span></div>
-      <div class="table-wrap"><table><thead><tr><th scope="col">Round</th>${head}<th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
-      <tbody>${rows}</tbody><tfoot><tr><td>Total</td>${g.playerIds.map((id) => `<td>${totals[id]}</td>`).join('')}<td></td></tr></tfoot></table></div>`;
+    return `<div class="panel-head"><h2><span class="pip pip-green"></span>Scorecard</h2><span class="entry-hint">★ round winner${canEdit() ? ' · ✎ to fix a round' : ''}</span></div>
+      <div class="table-wrap"><table><thead><tr><th scope="col">Round</th>${head}${canEdit() ? '<th scope="col"><span class="sr-only">Actions</span></th>' : ''}</tr></thead>
+      <tbody>${rows}</tbody><tfoot><tr><td>Total</td>${g.playerIds.map((id) => `<td>${totals[id]}</td>`).join('')}${canEdit() ? '<td></td>' : ''}</tr></tfoot></table></div>`;
   }
 
   function podium(g) {
@@ -543,7 +600,7 @@ Write ONE hot take of at most 2 short sentences (under 45 words). Be playful and
       <span class="eyebrow">Champion</span>
       <h2>${esc(w ? `${w.emoji} ${w.name}` : 'Someone')}</h2>
       ${podium(g)}
-      <div class="btn-row" style="justify-content:center;margin-top:8px">
+      <div class="btn-row" style="justify-content:center;margin-top:8px" ${canEdit() ? '' : 'hidden'}>
         <button type="button" class="btn btn-green" data-action="play-again" data-game="${esc(g.id)}">Play again, same players</button>
         <button type="button" class="btn btn-ghost" data-action="new-game">New game</button>
       </div>
@@ -560,7 +617,7 @@ Write ONE hot take of at most 2 short sentences (under 45 words). Be playful and
       game.endLine = L.gameOverLine(game, names());
       done = game;
     });
-    showGameOver(done);
+    if (role === 'local') showGameOver(done); // the hosted page shows it after reloading
   }
 
   function showGameOver(g) {
@@ -578,7 +635,7 @@ Write ONE hot take of at most 2 short sentences (under 45 words). Be playful and
         ${podium(g)}
       </div>
       <div class="btn-row" style="justify-content:center">
-        <button type="button" class="btn btn-green" data-action="play-again" data-game="${esc(g.id)}">Play again</button>
+        ${canEdit() ? `<button type="button" class="btn btn-green" data-action="play-again" data-game="${esc(g.id)}">Play again</button>` : ''}
         <button type="button" class="btn btn-ghost" data-action="close-modal">See final scores</button>
       </div>`,
       { label: 'Game over' }
@@ -626,7 +683,7 @@ Write ONE hot take of at most 2 short sentences (under 45 words). Be playful and
   function renderStats() {
     const games = [...state.games].sort((a, b) => b.createdAt - a.createdAt);
     const withRounds = games.filter((g) => g.rounds.length);
-    if (!withRounds.length) return emptyState('📊', 'No scores yet', 'Play a round and the leaderboard, trophies and charts show up here.', 'go-play', 'Start a game');
+    if (!withRounds.length) return emptyState('📊', 'No scores yet', 'Play a round and the leaderboard, trophies and charts show up here.', canEdit() ? 'go-play' : null, 'Start a game');
     const P = byId();
     const stats = Object.values(L.playerStats(state)).filter((s) => s.rounds > 0);
     const aw = L.awards(state);
@@ -682,7 +739,7 @@ Write ONE hot take of at most 2 short sentences (under 45 words). Be playful and
             `<div class="mini-row"><b>${row.rank}</b><span class="who">${avatar(P[row.id])}<span>${esc(P[row.id] ? P[row.id].name : '?')}${g.winnerId === row.id ? ' 🏆' : ''}</span></span><span class="num">${row.total}</span><div class="mini-bar pc-${esc(P[row.id] ? P[row.id].color : 'ink')}"><i style="width:${(Math.abs(row.total) / max) * 100}%"></i></div></div>`
         )
         .join('')}</div>
-      <div class="btn-row">
+      <div class="btn-row" ${canEdit() ? '' : 'hidden'}>
         <button type="button" class="btn ${g.status === 'active' ? 'btn-red' : 'btn-ink'} btn-small" data-action="open-game" data-game="${esc(g.id)}">${g.status === 'active' ? 'Resume' : 'Open'}</button>
         <button type="button" class="btn btn-ghost btn-small" data-action="delete-game" data-game="${esc(g.id)}" aria-label="Delete ${esc(g.name)}">Delete</button>
       </div>
@@ -712,13 +769,13 @@ Write ONE hot take of at most 2 short sentences (under 45 words). Be playful and
         const s = stats[p.id];
         return `<article class="roster-card">
           <div class="roster-top">${avatar(p, 'avatar-lg')}<div style="min-width:0;flex:1"><h3>${esc(p.name)}</h3><span class="muted" style="font-size:.8rem;font-weight:700">${s.lastPlayed ? `Last played ${esc(ago(s.lastPlayed))}` : 'Yet to play'}</span></div>
-            <button type="button" class="btn btn-ghost btn-small" data-action="edit-player" data-pid="${esc(p.id)}">Edit</button></div>
+            ${canEdit() ? `<button type="button" class="btn btn-ghost btn-small" data-action="edit-player" data-pid="${esc(p.id)}">Edit</button>` : ''}</div>
           <div class="roster-stats"><div><strong>${s.wins}</strong><small>Wins</small></div><div><strong>${s.games}</strong><small>Games</small></div><div><strong>${s.roundsWon}</strong><small>Rounds won</small></div></div>
         </article>`;
       })
       .join('');
-    return `<section class="game-head"><div class="game-title"><span class="eyebrow">${plural(state.players.length, 'player')} saved</span><h1>Players</h1><p class="muted">Everyone saved here can be tapped into a new game.</p></div></section>
-      <section class="panel"><form class="add-inline" id="roster-add"><input type="text" id="roster-new" class="text-input" placeholder="New player name" maxlength="24" aria-label="New player name" autocomplete="off"><button type="submit" class="btn btn-red">Add player</button></form></section>
+    return `<section class="game-head"><div class="game-title"><span class="eyebrow">${plural(state.players.length, 'player')} saved</span><h1>Players</h1><p class="muted">${canEdit() ? 'Everyone saved here can be tapped into a new game.' : 'Everyone who has a seat at this table.'}</p></div></section>
+      <section class="panel" ${canEdit() ? '' : 'hidden'}><form class="add-inline" id="roster-add"><input type="text" id="roster-new" class="text-input" placeholder="New player name" maxlength="24" aria-label="New player name" autocomplete="off"><button type="submit" class="btn btn-red">Add player</button></form></section>
       ${state.players.length ? `<section class="roster">${cards}</section>` : ''}`;
   }
 
@@ -790,15 +847,15 @@ Write ONE hot take of at most 2 short sentences (under 45 words). Be playful and
 
   /* ------------------------------------------------------------------- misc */
   function emptyState(icon, title, body, action, label) {
-    return `<section class="panel"><div class="empty"><span class="empty-icon">${icon}</span><h2>${esc(title)}</h2><p>${esc(body)}</p><button type="button" class="btn btn-red" data-action="${action}">${esc(label)}</button></div></section>`;
+    return `<section class="panel"><div class="empty"><span class="empty-icon">${icon}</span><h2>${esc(title)}</h2><p>${esc(body)}</p>${action ? `<button type="button" class="btn btn-red" data-action="${action}">${esc(label)}</button>` : ''}</div></section>`;
   }
 
   function openBackup() {
     const json = JSON.stringify(state, null, 1);
-    const where = S.mode === 'cloud' ? 'Scores sync live to everyone who opens this tracker.' : 'Scores are saved in this browser. Download a backup to move them to another device.';
+    const where = HOSTED ? 'Scores are saved in this page for everyone with the link. Copy a backup to keep a spare.' : 'Scores are saved in this browser. Download a backup to move them to another device.';
     openModal(
       `${modalHead('Back up & restore', esc(where))}
-      <div class="btn-row"><button type="button" class="btn btn-blue" id="bk-download">Download backup</button><button type="button" class="btn btn-ghost" id="bk-copy">Copy to clipboard</button></div>
+      <div class="btn-row"><button type="button" class="btn btn-blue" id="bk-download" ${HOSTED ? 'hidden' : ''}>Download backup</button><button type="button" class="btn btn-ghost" id="bk-copy">Copy to clipboard</button></div>
       <label class="field"><span>Restore from a backup file</span><input type="file" id="bk-file" accept="application/json,.json"></label>
       <label class="field"><span>…or paste backup text</span><textarea id="bk-text" spellcheck="false"></textarea></label>
       <div class="btn-row" style="justify-content:space-between"><button type="button" class="btn btn-ghost" id="bk-wipe">Erase everything</button><button type="button" class="btn btn-red" id="bk-restore">Restore</button></div>`,
@@ -806,15 +863,7 @@ Write ONE hot take of at most 2 short sentences (under 45 words). Be playful and
         label: 'Backup',
         onMount: (m) => {
           const filename = `uno-tracker-${new Date().toISOString().slice(0, 10)}.json`;
-          $('#bk-download', m).addEventListener('click', async () => {
-            if (downloads) {
-              try {
-                await downloads.save({ filename, data: new Blob([json], { type: 'application/json' }) });
-                return toast('Backup saved.');
-              } catch (e) {
-                return toast('The download was cancelled. Copy to clipboard works too.');
-              }
-            }
+          $('#bk-download', m).addEventListener('click', () => {
             const a = document.createElement('a');
             a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
             a.download = filename;
@@ -904,6 +953,86 @@ Write ONE hot take of at most 2 short sentences (under 45 words). Be playful and
           if (i >= 0) s.games[i] = before;
         }),
     });
+  }
+
+  /* -------------------------------------------------------------- page frame */
+  function mountShell() {
+    document.body.insertAdjacentHTML(
+      'afterbegin',
+      `<header class="topbar">
+  <div class="topbar-inner">
+    <button class="brand" type="button" data-action="go" data-view="play" aria-label="Uno Tracker home">
+      <span class="logo-oval"><span>UNO</span></span>
+      <span class="brand-word">Tracker</span>
+    </button>
+    <nav class="tabs" aria-label="Sections">
+      <button type="button" class="tab c-red" data-action="go" data-view="play"><span class="tab-glyph">▶</span>Game</button>
+      <button type="button" class="tab c-yellow" data-action="go" data-view="stats"><span class="tab-glyph">★</span>Stats</button>
+      <button type="button" class="tab c-green" data-action="go" data-view="players"><span class="tab-glyph">☺</span>Players</button>
+    </nav>
+    <div class="top-actions">
+      <span id="sync-chip" class="sync-chip"></span>
+      <button type="button" class="icon-btn" id="mute-btn" data-action="mute" aria-label="Toggle sound">🔊</button>
+      <button type="button" class="icon-btn" id="backup-btn" data-action="backup" aria-label="Back up or restore data">⇅</button>
+    </div>
+  </div>
+</header>
+<div id="demo-banner" class="demo-banner" hidden>
+  <span><strong>Demo game night.</strong> These players and scores are examples so you can see how it works.</span>
+  <button type="button" class="btn btn-small btn-ink" data-action="clear-demo">Clear demo and start fresh</button>
+</div>
+<main id="view" class="wrap" tabindex="-1"></main>
+<footer class="foot wrap"><span>Card values: numbers = face value · Skip, Reverse, Draw Two = 20 · Wild, Wild Draw Four = 50</span></footer>
+<div id="modal-root"></div>
+<div id="toast-root" class="toast-root" aria-live="polite"></div>
+<div id="saving" class="saving" hidden><span>Saving scores for everyone…</span></div>
+<canvas id="fx" aria-hidden="true"></canvas>`
+    );
+  }
+
+  /* After a reload (a new version of the hosted page), put the viewer back where they were. */
+  const bootUi = S.readUi();
+  loadedSeen = seenOf(state);
+
+  function restoreUi() {
+    if (!bootUi) return;
+    if (['play', 'stats', 'players'].includes(bootUi.view)) view = bootUi.view;
+    statsGameId = bootUi.statsGameId || null;
+    if (bootUi.setup) setup = { ...bootUi.setup, sel: new Set(bootUi.setup.sel || []) };
+    if (bootUi.draft && state.games.some((g) => g.id === bootUi.draft.gameId)) draft = bootUi.draft;
+  }
+
+  /* Celebrate what changed since this tab last saw the page: a new round or a finished game. */
+  function afterBoot() {
+    if (!bootUi) return;
+    if (bootUi.scrollY) requestAnimationFrame(() => window.scrollTo(0, bootUi.scrollY));
+    if (bootUi.flash) toast(bootUi.flash);
+    const before = bootUi.seen;
+    const now = seenOf(state);
+    if (!HOSTED || !before || !now) return;
+    const g = currentGame();
+    if (now.gameId !== before.gameId) {
+      if (!now.rounds) toast('A new game just started!');
+      return;
+    }
+    if (now.status === 'finished' && before.status !== 'finished') {
+      setTimeout(() => showGameOver(g), 300);
+      return;
+    }
+    if (now.rounds > before.rounds) {
+      const r = g.rounds[g.rounds.length - 1];
+      justScored = r.points;
+      render();
+      FX.sound('round');
+      const card = r.winnerId && $(`.pcard[data-pid="${r.winnerId}"]`);
+      if (card) {
+        const box = card.getBoundingClientRect();
+        FX.confetti({ x: box.left + box.width / 2, y: box.top + box.height / 3, count: 40, spread: 0.6 });
+      }
+      const top = L.standings(g)[0];
+      const leader = byId()[top.id];
+      toast(`Round ${g.rounds.length} is in! ${leader ? leader.name : 'Someone'} leads with ${top.total}.`);
+    }
   }
 
   /* ---------------------------------------------------------------- actions */
@@ -1024,7 +1153,6 @@ Write ONE hot take of at most 2 short sentences (under 45 words). Be playful and
       });
     },
     'add-to-game': openAddToGame,
-    'ai-take': aiTake,
     'edit-player': (el) => openPlayerEditor(el.dataset.pid),
   };
 
@@ -1043,37 +1171,27 @@ Write ONE hot take of at most 2 short sentences (under 45 words). Be playful and
   scheme && scheme.addEventListener && scheme.addEventListener('change', () => view === 'stats' && render());
   new MutationObserver(() => view === 'stats' && render()).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
-  S.on((type, payload) => {
-    if (type === 'remote') {
-      if (JSON.stringify(payload) === JSON.stringify(state)) return;
-      state = payload;
-      const typing = document.activeElement && document.activeElement.matches('input, textarea');
-      if (!$('#modal-root').innerHTML && !typing) render();
-      else renderSync();
-    } else if (type === 'cloud-empty') {
-      if (!state.isDemo && (state.players.length || state.games.length)) S.save(state);
-    } else if (type === 'mode') {
-      renderSync();
-      if (S.mode === 'readonly') toast('This tracker is view-only for you.');
-    } else if (type === 'error') {
-      toast(payload);
-    }
-  });
-
+  mountShell();
+  restoreUi();
   render();
+  afterBoot();
+  addEventListener('pagehide', () => stash());
 
-  S.connectCloud().then((ok) => ok && renderSync());
-  if (window.claude && typeof window.claude.use === 'function') {
-    window.claude
-      .use('sample')
-      .then((s) => {
-        sample = s;
-        if (s && view === 'play') render();
+  if (HOSTED) {
+    Promise.all([window.claude.use('user'), window.claude.use('artifact')])
+      .then(async ([user, art]) => {
+        let editor = false;
+        try {
+          editor = !!(user && art && (await user.canEdit()));
+        } catch (e) {}
+        artifactApi = art;
+        role = editor ? 'editor' : 'viewer';
+        if (editor && !EMBEDDED) state = window.UnoDemo.build(L); // brand-new page: show the demo until the first change
+        render();
       })
-      .catch(() => {});
-    window.claude
-      .use('downloads')
-      .then((d) => (downloads = d))
-      .catch(() => {});
+      .catch(() => {
+        role = 'viewer';
+        render();
+      });
   }
 })();

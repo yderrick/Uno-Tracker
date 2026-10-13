@@ -77,3 +77,13 @@ test('all-time stats and awards', () => {
   assert.equal(s.c.seconds, 1);
   assert.ok(L.awards(state).find((x) => x.key === 'champ' && x.winnerId === 'a'));
 });
+
+test('the single-file page keeps scores inside a script tag safely', () => {
+  const Page = require('../js/page.js');
+  const data = { players: [{ id: 'p', name: '</script><img src=x onerror=alert(1)>' }], games: [] };
+  const html = Page.documentHtml({ css: 'body{}', js: 'void 0', data });
+  assert.ok(html.startsWith('<!doctype html><html><head><meta charset=utf8>'));
+  const json = html.match(/id="uno-data">([^]*?)<\/script>/)[1];
+  assert.doesNotMatch(json, /</);
+  assert.deepEqual(JSON.parse(json), data);
+});
