@@ -235,5 +235,65 @@
     });
   }
 
-  window.UnoCharts = { available: () => !!window.Chart, colorOf, race, bump, perRound, share, radar, wins, destroyAll };
+  /** Cumulative points per player, game after game (oldest game first). */
+  function pointsOverTime(canvas, games, ids, byId) {
+    const b = base();
+    const ordered = [...games].filter((g) => g.rounds.length).sort((a, z) => a.createdAt - z.createdAt);
+    const labels = ['Start', ...ordered.map((g, i) => `G${i + 1}`)];
+    const run = Object.fromEntries(ids.map((id) => [id, [0]]));
+    ordered.forEach((g) => {
+      const t = L().totals(g);
+      ids.forEach((id) => {
+        const a = run[id];
+        a.push(a[a.length - 1] + (t[id] || 0));
+      });
+    });
+    const datasets = ids.map((id) => {
+      const c = colorOf(byId[id]);
+      return {
+        label: label(byId[id]),
+        data: run[id],
+        borderColor: c,
+        backgroundColor: c,
+        pointRadius: run[id].map((_, i) => (i === run[id].length - 1 ? 5 : 0)),
+        pointHoverRadius: 6,
+        borderWidth: 3,
+        tension: 0.3,
+        cubicInterpolationMode: 'monotone',
+      };
+    });
+    const opt = b.options;
+    opt.scales.y.beginAtZero = true;
+    opt.scales.y.ticks.precision = 0;
+    opt.plugins.tooltip.callbacks = {
+      title: (items) => {
+        const i = items[0].dataIndex;
+        return i ? `After ${ordered[i - 1].name}` : 'Start';
+      },
+      label: (ctx) => ` ${ctx.dataset.label}: ${ctx.parsed.y} pts`,
+    };
+    return make(canvas, { type: 'line', data: { labels, datasets }, options: opt });
+  }
+
+  /** Each player's slice of every point ever scored. */
+  function pointsShare(canvas, statList, byId) {
+    const b = base();
+    const list = [...statList].filter((s) => s.points > 0).sort((a, z) => z.points - a.points);
+    const opt = b.options;
+    delete opt.scales;
+    opt.cutout = '58%';
+    opt.plugins.legend.position = 'right';
+    opt.interaction = { mode: 'nearest', intersect: true };
+    opt.plugins.tooltip.callbacks = { label: (ctx) => ` ${ctx.label}: ${ctx.parsed} pts` };
+    return make(canvas, {
+      type: 'doughnut',
+      data: {
+        labels: list.map((s) => label(byId[s.id])),
+        datasets: [{ data: list.map((s) => s.points), backgroundColor: list.map((s) => colorOf(byId[s.id])), borderColor: css('--surface'), borderWidth: 4, hoverOffset: 14 }],
+      },
+      options: opt,
+    });
+  }
+
+  window.UnoCharts = { available: () => !!window.Chart, colorOf, race, bump, perRound, share, radar, wins, pointsOverTime, pointsShare, destroyAll };
 })();

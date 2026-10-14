@@ -60,7 +60,11 @@
   const byId = () => Object.fromEntries(state.players.map((p) => [p.id, p]));
   const names = () => Object.fromEntries(state.players.map((p) => [p.id, p.name]));
   const findGame = (id) => state.games.find((g) => g.id === id) || null;
-  const currentGame = () => findGame(state.activeGameId);
+  // Which table this viewer is looking at: null = the Tables lobby, 'new' = setting up a
+  // game, or a game id. Kept per viewer so several games can run at once.
+  let focus = null;
+  const currentGame = () => (focus && focus !== 'new' ? findGame(focus) : null);
+  const liveGames = () => state.games.filter((g) => g.status === 'active' || g.status === 'paused');
   const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
   const listJoin = (a) => (a.length <= 1 ? a.join('') : `${a.slice(0, -1).join(', ')} and ${a[a.length - 1]}`);
   const ruleText = (g) => `${L.higherWins(g) ? 'Highest' : 'Lowest'} score wins${g.target ? ` · ${L.higherWins(g) ? 'first to' : 'ends at'} ${g.target}` : ''}`;
@@ -98,6 +102,7 @@
     if (role === 'local') {
       if (!S.saveLocal(state)) toast('Could not save on this device. Use Back up to keep a copy.');
     } else {
+      dirty = true;
       schedulePublish();
     }
     if (opts.render !== false) render();
@@ -105,15 +110,57 @@
 
   /* ---------------------------------------------- publishing (hosted page) */
   const seenOf = (st) => {
-    const g = st.games.find((x) => x.id === st.activeGameId);
+    const g = st.games.find((x) => x.id === focus);
     return g ? { gameId: g.id, rounds: g.rounds.length, status: g.status } : null;
   };
+
+  /* Simultaneous tables: if another table saved first, re-apply this view's changes
+     (whole games and players it changed) on top of theirs after the reload. */
+  let baseline = HOSTED ? JSON.parse(JSON.stringify(state)) : null;
+  let pendingReplay = null;
+  let replayTries = 0;
+  let dirty = false; // changes this view made that are not published yet
+  function diffFromBaseline() {
+    if (!baseline) return null;
+    const ser = (x) => JSON.stringify(x);
+    const bG = new Map(baseline.games.map((g) => [g.id, ser(g)]));
+    const bP = new Map(baseline.players.map((p) => [p.id, ser(p)]));
+    const bRounds = new Map(baseline.games.map((g) => [g.id, g.rounds.map((r) => r.id)]));
+    return {
+      games: state.games.filter((g) => bG.get(g.id) !== ser(g)),
+      baseRounds: Object.fromEntries(state.games.filter((g) => bG.get(g.id) !== ser(g)).map((g) => [g.id, bRounds.get(g.id) || []])),
+      removed: baseline.games.filter((g) => !state.games.some((x) => x.id === g.id)).map((g) => g.id),
+      players: state.players.filter((p) => bP.get(p.id) !== ser(p)),
+      removedPlayers: baseline.players.filter((p) => !state.players.some((x) => x.id === p.id)).map((p) => p.id),
+    };
+  }
+  function applyReplay(r) {
+    state.games = state.games.filter((g) => !r.removed.includes(g.id));
+    r.games.forEach((g) => {
+      const i = state.games.findIndex((x) => x.id === g.id);
+      if (i < 0) return state.games.push(g);
+      // Keep rounds someone else added to the same game in the meantime.
+      const mine = new Set(g.rounds.map((x) => x.id));
+      const base = new Set((r.baseRounds && r.baseRounds[g.id]) || []);
+      const theirs = state.games[i].rounds.filter((x) => !mine.has(x.id) && !base.has(x.id));
+      state.games[i] = theirs.length ? { ...g, rounds: [...g.rounds, ...theirs].sort((a, b) => (a.at || 0) - (b.at || 0)) } : g;
+    });
+    state.players = state.players.filter((p) => !r.removedPlayers.includes(p.id));
+    r.players.forEach((p) => {
+      const i = state.players.findIndex((x) => x.id === p.id);
+      if (i >= 0) state.players[i] = p;
+      else state.players.push(p);
+    });
+  }
 
   function stash(extra = {}) {
     S.stashUi({
       view,
+      focus,
       statsGameId,
       compareIds,
+      replay: pendingReplay,
+      replayTries,
       setup: setup && { ...setup, sel: [...setup.sel] },
       draft,
       scrollY: window.scrollY,
@@ -139,13 +186,17 @@
     setSaving(true);
     try {
       await artifactApi.publish(window.UnoPage.documentHtml({ ...SOURCE, data: state, reset: S.hostReset() }));
+      dirty = false;
+      replayTries = 0;
       // Every open view, this one included, now reloads to the new version.
       setTimeout(() => setSaving(false), 12000);
     } catch (e) {
       setSaving(false);
       const code = e && e.code;
       if (code === 'conflict') {
-        stash({ flash: 'Someone else saved at the same moment. Check the last round and enter it again if it is missing.' });
+        const diff = diffFromBaseline();
+        if (diff && replayTries < 3) stash({ replay: diff, replayTries: replayTries + 1 });
+        else stash({ flash: 'Someone else saved at the same moment. Check the last round and enter it again if it is missing.' });
         return;
       }
       if (['not_writer', 'not_granted', 'not_declared', 'consent_required', 'capability_disabled', 'capability_removed'].includes(code)) {
@@ -240,9 +291,15 @@
     $$('.tab').forEach((t) => (t.dataset.view === view ? t.setAttribute('aria-current', 'page') : t.removeAttribute('aria-current')));
     $('#demo-banner').hidden = !(state.isDemo && isAdmin());
     renderSync();
-    const views = { play: renderPlay, stats: renderStats, trophies: renderTrophies, players: renderPlayers };
+    const views = { play: renderPlay, stats: renderStats, points: renderPoints, trophies: renderTrophies, players: renderPlayers };
     $('#view').innerHTML = (views[view] || renderPlay)();
-    const after = { play: afterPlay, stats: afterStats, players: afterPlayers }[view];
+    const after = { play: afterPlay, stats: afterStats, points: afterPoints, players: afterPlayers }[view];
+    const live = state.games.filter((g) => g.status === 'active').length;
+    const badge = $('#live-count');
+    if (badge) {
+      badge.textContent = live;
+      badge.hidden = !live;
+    }
     after && after();
     justScored = null;
     if (role === 'editor' && !me && !$('#gate-form')) openGate();
@@ -270,17 +327,56 @@
 
   /* ---------------------------------------------------------------- GAME TAB */
   function renderPlay() {
+    if (focus === 'new' && canManage()) return renderSetup();
     const g = currentGame();
     if (g) return renderGame(g);
-    return canManage() ? renderSetup() : renderWaiting();
+    return renderLobby();
   }
 
-  function renderWaiting() {
-    const recent = [...state.games].sort((a, b) => b.createdAt - a.createdAt).slice(0, 4);
+  /* The Tables lobby: every game in progress, live or paused, side by side. */
+  function lastActivity(g) {
+    const r = g.rounds[g.rounds.length - 1];
+    return Math.max(g.createdAt || 0, (r && r.at) || 0, g.pausedAt || 0, g.resumedAt || 0);
+  }
+
+  function tableCard(g, P) {
+    const st = L.standings(g);
+    const paused = g.status === 'paused';
+    const mine = inGame(g);
+    return `<article class="table-card ${paused ? 'is-paused' : ''} ${mine ? 'is-mine' : ''}">
+      <div class="table-top">
+        <div style="min-width:0"><h3>${esc(g.name)}</h3><span class="muted table-sub">${g.rounds.length ? `Round ${g.rounds.length + 1}` : 'Just dealt'} · ${esc(ruleText(g))} · ${esc(ago(lastActivity(g)))}</span></div>
+        ${paused ? '<span class="pill pill-paused">⏸ Paused</span>' : '<span class="pill pill-live">Live</span>'}
+      </div>
+      ${mine ? '<span class="pick-tag table-you">You’re playing</span>' : ''}
+      <div class="table-score">${st
+        .map(
+          (row) =>
+            `<span class="table-player pc-${esc(P[row.id] ? P[row.id].color : 'ink')}">${avatar(P[row.id])}<span class="table-name">${esc(P[row.id] ? P[row.id].name : '?')}</span><b>${row.total}</b></span>`
+        )
+        .join('<span class="table-vs">vs</span>')}</div>
+      <div class="btn-row">
+        <button type="button" class="btn ${paused ? 'btn-ghost' : 'btn-red'} btn-small" data-action="open-game" data-game="${esc(g.id)}">${canEditGame(g) && !paused ? 'Play' : 'Open'}</button>
+        ${canEditGame(g) ? (paused ? `<button type="button" class="btn btn-green btn-small" data-action="resume-game" data-game="${esc(g.id)}">▶ Resume</button>` : `<button type="button" class="btn btn-ghost btn-small" data-action="pause-game" data-game="${esc(g.id)}">⏸ Pause</button>`) : ''}
+      </div>
+    </article>`;
+  }
+
+  function renderLobby() {
     const P = byId();
-    return `<section class="game-head"><div class="game-title"><span class="eyebrow">${role === 'checking' ? 'Loading' : 'Watching live'}</span><h1>No game right now</h1>
-        <p class="muted">When the scorekeeper starts a game, the scoreboard shows up here by itself.</p></div></section>
-      ${recent.length ? `<section class="panel"><div class="panel-head"><h2><span class="pip pip-blue"></span>Recent games</h2></div><div class="games">${recent.map((g) => gameCard(g, P)).join('')}</div></section>` : ''}`;
+    const byRecent = (a, b) => (inGame(b) - inGame(a)) || lastActivity(b) - lastActivity(a);
+    const live = state.games.filter((g) => g.status === 'active').sort(byRecent);
+    const paused = state.games.filter((g) => g.status === 'paused').sort(byRecent);
+    const recent = state.games.filter((g) => g.status === 'finished').sort((a, b) => (b.finishedAt || b.createdAt) - (a.finishedAt || a.createdAt)).slice(0, 3);
+    const watching = !canManage();
+    return `
+      <section class="game-head"><div class="game-title"><span class="eyebrow">${role === 'checking' ? 'Loading' : live.length ? `${plural(live.length, 'game')} live` : 'Game night'}</span><h1>Tables</h1>
+        <p class="muted">${watching ? 'Every game being played right now. Tap one to follow it live.' : 'Run as many games at once as you like. Pause one when someone steps out, and pick it back up later.'}</p></div>
+        ${canManage() ? '<button type="button" class="btn btn-red btn-big" data-action="new-game">+ New game</button>' : ''}</section>
+      <section class="panel"><div class="panel-head"><h2><span class="pip pip-red"></span>Live now</h2><span class="entry-hint">${live.length ? 'Scores update by themselves' : ''}</span></div>
+        ${live.length ? `<div class="tables">${live.map((g) => tableCard(g, P)).join('')}</div>` : `<div class="empty"><span class="empty-icon">🃏</span><p>No games on right now.</p>${canManage() ? '<button type="button" class="btn btn-red" data-action="new-game">Deal a new game</button>' : ''}</div>`}</section>
+      ${paused.length ? `<section class="panel"><div class="panel-head"><h2><span class="pip pip-yellow"></span>Paused</h2><span class="entry-hint">Waiting for everyone to come back</span></div><div class="tables">${paused.map((g) => tableCard(g, P)).join('')}</div></section>` : ''}
+      ${recent.length ? `<section class="panel"><div class="panel-head"><h2><span class="pip pip-blue"></span>Just finished</h2><button type="button" class="link-btn" data-action="go" data-view="stats">All games</button></div><div class="games">${recent.map((g) => gameCard(g, P)).join('')}</div></section>` : ''}`;
   }
 
   function ensureSetup() {
@@ -349,10 +445,8 @@
     draft = null;
     dealtFor = null;
     view = 'play';
-    commit((st) => {
-      st.games.push(g);
-      st.activeGameId = g.id;
-    });
+    focus = g.id;
+    commit((st) => st.games.push(g));
     FX.sound('uno');
     FX.confetti({ count: 80, spread: 0.7 });
     window.scrollTo({ top: 0 });
@@ -388,33 +482,40 @@
       })
       .join('');
 
+    const paused = g.status === 'paused';
     return `
+      <button type="button" class="link-btn back-link" data-action="go-hub">← All tables</button>
       <section class="game-head">
         <div class="game-title">
-          <span class="eyebrow">${finished ? 'Final scores' : `Round ${g.rounds.length + 1}`}</span>
+          <span class="eyebrow">${finished ? 'Final scores' : paused ? `Paused before round ${g.rounds.length + 1}` : `Round ${g.rounds.length + 1}`}</span>
           <h1>${esc(g.name)}</h1>
           <div class="game-meta">
-            ${finished ? (L.isDraw(g) ? `<span class="pill pill-done">🤝 Draw · ${esc(scoreline(g))}</span>` : `<span class="pill pill-done">🏆 ${esc(P[L.winnerOf(g)] ? P[L.winnerOf(g)].name : '')} won</span>`) : '<span class="pill pill-live">Live</span>'}
+            ${finished ? (L.isDraw(g) ? `<span class="pill pill-done">🤝 Draw · ${esc(scoreline(g))}</span>` : `<span class="pill pill-done">🏆 ${esc(P[L.winnerOf(g)] ? P[L.winnerOf(g)].name : '')} won</span>`) : paused ? '<span class="pill pill-paused">⏸ Paused</span>' : '<span class="pill pill-live">Live</span>'}
             <span class="pill">${esc(ruleText(g))}</span>
-            ${!canEditGame(g) && !finished ? `<span class="pill">${ready() ? '👀 You’re not in this game, so you’re watching' : '👀 Updates by itself'}</span>` : ''}
+            ${!canEditGame(g) && !finished && !paused ? `<span class="pill">${ready() ? '👀 You’re not in this game, so you’re watching' : '👀 Updates by itself'}</span>` : ''}
           </div>
         </div>
         <div class="btn-row" ${(finished ? canManage() : canEditGame(g)) ? '' : 'hidden'}>
           ${
             finished
               ? `<button type="button" class="btn btn-ghost" data-action="new-game">New game</button>`
-              : `<button type="button" class="btn btn-ghost btn-small" data-action="game-settings">⚙ Settings</button>
-                 <button type="button" class="btn btn-ghost btn-small" data-action="add-to-game">+ Player</button>
-                 <button type="button" class="btn btn-ghost btn-small" data-action="quit-game">Quit game</button>
-                 <button type="button" class="btn btn-ink btn-small" data-action="finish-game" ${g.rounds.length ? '' : 'disabled'}>Finish game</button>`
+              : paused
+                ? `<button type="button" class="btn btn-ghost btn-small" data-action="game-settings">⚙ Settings</button>
+                   <button type="button" class="btn btn-ghost btn-small" data-action="quit-game">Quit game</button>
+                   <button type="button" class="btn btn-green btn-small" data-action="resume-game" data-game="${esc(g.id)}">▶ Resume</button>`
+                : `<button type="button" class="btn btn-ghost btn-small" data-action="game-settings">⚙ Settings</button>
+                   <button type="button" class="btn btn-ghost btn-small" data-action="add-to-game">+ Player</button>
+                   <button type="button" class="btn btn-ghost btn-small" data-action="pause-game" data-game="${esc(g.id)}">⏸ Pause</button>
+                   <button type="button" class="btn btn-ghost btn-small" data-action="quit-game">Quit game</button>
+                   <button type="button" class="btn btn-ink btn-small" data-action="finish-game" ${g.rounds.length ? '' : 'disabled'}>Finish game</button>`
           }
         </div>
       </section>
       <section class="board" aria-label="Scoreboard">${cards}</section>
       ${
-        canEditGame(g) || finished
+        canEditGame(g) || finished || paused
           ? `<div class="grid-2">
-        <section class="panel" id="entry-panel">${canEditGame(g) && (!finished || isEditing(g)) ? renderEntry(g) : renderFinishedPanel(g)}</section>
+        <section class="panel" id="entry-panel">${paused && !isEditing(g) ? renderPausedPanel(g) : canEditGame(g) && (!finished || isEditing(g)) ? renderEntry(g) : renderFinishedPanel(g)}</section>
         <section class="panel">${renderFeed(g)}</section>
       </div>`
           : `<section class="panel">${renderFeed(g)}</section>`
@@ -458,7 +559,7 @@
 
   function submitRound() {
     const g = currentGame();
-    if (!g || (g.status === 'finished' && !isEditing(g))) return;
+    if (!g || ((g.status === 'finished' || g.status === 'paused') && !isEditing(g))) return;
     const d = ensureDraft(g);
     const editingId = d.editingId;
     const editIdx = editingId ? g.rounds.findIndex((r) => r.id === editingId) : -1;
@@ -619,6 +720,16 @@
       .join('')}</div>`;
   }
 
+  function renderPausedPanel(g) {
+    return `<div class="trophy" style="padding:10px 0">
+      <span class="trophy-cup">⏸</span>
+      <span class="eyebrow">Paused · ${esc(scoreline(g))}</span>
+      <h2>Taking a breather</h2>
+      <p class="muted">The scores are safe. ${canEditGame(g) ? 'Resume when everyone’s back at the table.' : 'The players will pick it back up later.'}</p>
+      ${canEditGame(g) ? `<div class="btn-row" style="justify-content:center;margin-top:8px"><button type="button" class="btn btn-green btn-big" data-action="resume-game" data-game="${esc(g.id)}">▶ Resume game</button></div>` : ''}
+    </div>`;
+  }
+
   function renderFinishedPanel(g) {
     const draw = L.isDraw(g);
     const w = byId()[L.winnerOf(g)];
@@ -753,7 +864,7 @@
       .join('');
     return `
       <section class="panel dash-head"><div class="panel-head" style="margin:0"><h2><span class="pip pip-red"></span>Game dashboard</h2>
-        <select class="select" id="stats-game" aria-label="Game">${withRounds.map((x) => `<option value="${esc(x.id)}" ${x.id === g.id ? 'selected' : ''}>${esc(x.name)} · ${esc(ago(x.createdAt))}${x.status === 'active' ? ' · live' : ''}</option>`).join('')}</select></div></section>
+        <select class="select" id="stats-game" aria-label="Game">${withRounds.map((x) => `<option value="${esc(x.id)}" ${x.id === g.id ? 'selected' : ''}>${esc(x.name)} · ${esc(ago(x.createdAt))}${x.status === 'active' ? ' · live' : x.status === 'paused' ? ' · paused' : ''}</option>`).join('')}</select></div></section>
       <section class="tiles">${tiles
         .map(([c, l, v, sub]) => `<div class="tile" style="--tc:${c}"><span class="eyebrow">${esc(l)}</span><span class="tile-value ${typeof v === 'string' ? 'is-text' : ''}">${esc(v)}</span><span class="tile-sub">${esc(sub)}</span></div>`)
         .join('')}</section>
@@ -786,14 +897,7 @@
           `<tr>${nameCell(s, i)}<td><strong>${s.wins}</strong></td><td>${s.draws}</td><td>${s.losses}</td><td>${s.finished}</td><td>${Math.round(s.winRate * 100)}%</td><td>${s.roundsWon}</td><td>${s.longestStreak}</td><td>${held[s.id] || 0} 🏆</td></tr>`
       )
       .join('');
-    const topPts = Math.max(1, ...stats.map((s) => s.points));
-    const pointsBoard = [...stats]
-      .sort((a, b) => b.points - a.points || b.wins - a.wins)
-      .map(
-        (s, i) =>
-          `<tr>${nameCell(s, i)}<td class="pts-cell"><span class="pts-bar pc-${esc(P[s.id] ? P[s.id].color : 'ink')}"><i style="width:${Math.round((s.points / topPts) * 100)}%"></i></span><strong>${s.points}</strong></td><td>${s.games}</td><td>${fmtAvg(s.avgPerGame)}</td><td>${s.rounds ? fmtAvg(s.points / s.rounds) : '—'}</td><td>${s.bestGame || '—'}</td><td>${s.bestRound || '—'}</td></tr>`
-      )
-      .join('');
+
     const h2h = L.headToHead(state);
     const hp = stats.map((s) => s.id);
     const h2hTable =
@@ -821,8 +925,7 @@
         <div class="tile" style="--tc:var(--green)"><span class="eyebrow">Points scored</span><span class="tile-value">${totalPts.toLocaleString()}</span><span class="tile-sub">across all games</span></div>
         <div class="tile" style="--tc:var(--blue)"><span class="eyebrow">Players</span><span class="tile-value">${stats.length}</span><span class="tile-sub">have played</span></div>
       </section>
-      <section class="panel"><div class="panel-head"><h2><span class="pip pip-yellow"></span>Points table</h2><span class="entry-hint">Every point from every game, added up</span></div>
-        <div class="table-wrap"><table><thead><tr><th>Player</th><th>Points</th><th>Games</th><th>Per game</th><th>Per round</th><th>Best game</th><th>Best round</th></tr></thead><tbody>${pointsBoard}</tbody></table></div></section>
+      <section class="panel points-teaser"><div class="panel-head" style="margin:0"><h2><span class="pip pip-yellow"></span>Points table</h2><button type="button" class="btn btn-yellow btn-small" data-action="go" data-view="points">See the points table →</button></div></section>
       <section class="panel"><div class="panel-head"><h2><span class="pip pip-green"></span>Leaderboard</h2><span class="entry-hint">Ranked by wins. Draws count for nobody.</span></div>
         <div class="table-wrap"><table><thead><tr><th>Player</th><th title="Wins">W</th><th title="Draws">D</th><th title="Losses">L</th><th>Finished</th><th>Win %</th><th>Rounds won</th><th>Best streak</th><th>Trophies</th></tr></thead><tbody>${board}</tbody></table></div></section>
       <div class="chart-grid">
@@ -834,6 +937,59 @@
           <div class="chart-box"><canvas id="ch-radar" role="img" aria-label="Player comparison"></canvas></div></section>
       </div>
       <section class="panel"><div class="panel-head"><h2><span class="pip pip-blue"></span>Head to head</h2><span class="entry-hint">How often each row player finished above each column player</span></div>${h2hTable}</section>`;
+  }
+
+  /* ------------------------------------------------------------------- POINTS */
+  function renderPoints() {
+    const P = byId();
+    const stats = Object.values(L.playerStats(state))
+      .filter((s) => s.rounds > 0)
+      .sort((a, b) => b.points - a.points || b.wins - a.wins);
+    if (!stats.length)
+      return `<section class="game-head"><div class="game-title"><span class="eyebrow">Points</span><h1>Points table</h1></div></section>
+        <div class="empty"><span class="empty-icon">🔢</span><p>Play a round and the points start piling up here.</p></div>`;
+    const totalPts = stats.reduce((a, s) => a + s.points, 0);
+    const topPts = Math.max(1, ...stats.map((s) => s.points));
+    const leader = stats[0];
+    const second = stats[1];
+    const bestAvg = [...stats].filter((s) => s.games).sort((a, b) => b.avgPerGame - a.avgPerGame)[0];
+    const bestGame = [...stats].sort((a, b) => (b.bestGame || 0) - (a.bestGame || 0))[0];
+    const nm = (s) => esc(s && P[s.id] ? `${P[s.id].emoji} ${P[s.id].name}` : '?');
+    const rows = stats
+      .map((s, i) => {
+        const gap = i ? leader.points - s.points : 0;
+        return `<tr class="${i < 3 ? `pts-top pts-${i + 1}` : ''}"><td><span class="who"><b class="rank-num">${['🥇', '🥈', '🥉'][i] || i + 1}</b>${avatar(P[s.id])}<span>${esc(P[s.id] ? P[s.id].name : '?')}</span></span></td>
+          <td><span class="pts-cell"><span class="pts-bar pc-${esc(P[s.id] ? P[s.id].color : 'ink')}"><i style="width:${Math.round((s.points / topPts) * 100)}%"></i></span><strong>${s.points}</strong></span></td>
+          <td class="muted">${i ? `−${gap}` : 'Leader'}</td><td>${s.wins}</td><td>${s.games}</td><td>${fmtAvg(s.avgPerGame)}</td><td>${s.rounds ? fmtAvg(s.points / s.rounds) : '—'}</td><td>${s.bestGame || '—'}</td><td>${s.bestRound || '—'}</td></tr>`;
+      })
+      .join('');
+    return `
+      <section class="game-head"><div class="game-title"><span class="eyebrow">${totalPts.toLocaleString()} points scored all-time</span><h1>Points table</h1>
+        <p class="muted">Every point from every game, added up and ranked. Live and paused games count as they go.</p></div></section>
+      <section class="tiles">
+        <div class="tile" style="--tc:var(--yellow)"><span class="eyebrow">Top of the table</span><span class="tile-value">${leader.points}</span><span class="tile-sub">${nm(leader)}${second ? ` · ${leader.points - second.points} ahead` : ''}</span></div>
+        <div class="tile" style="--tc:var(--red)"><span class="eyebrow">Best per game</span><span class="tile-value">${bestAvg ? fmtAvg(bestAvg.avgPerGame) : '—'}</span><span class="tile-sub">${nm(bestAvg)}</span></div>
+        <div class="tile" style="--tc:var(--green)"><span class="eyebrow">Biggest single game</span><span class="tile-value">${bestGame.bestGame || 0}</span><span class="tile-sub">${nm(bestGame)}</span></div>
+        <div class="tile" style="--tc:var(--blue)"><span class="eyebrow">Points scored</span><span class="tile-value">${totalPts.toLocaleString()}</span><span class="tile-sub">by ${plural(stats.length, 'player')}</span></div>
+      </section>
+      <section class="panel"><div class="panel-head"><h2><span class="pip pip-yellow"></span>Points table</h2><span class="entry-hint">Ranked by cumulative points</span></div>
+        <div class="table-wrap"><table class="pts-table"><thead><tr><th>Player</th><th>Points</th><th>Gap</th><th>Wins</th><th>Games</th><th>Per game</th><th>Per round</th><th>Best game</th><th>Best round</th></tr></thead><tbody>${rows}</tbody></table></div></section>
+      <div class="chart-grid">
+        <section class="panel"><div class="panel-head"><h2><span class="pip pip-red"></span>The long race</h2><span class="entry-hint">Points piling up, game by game</span></div><div class="chart-box tall"><canvas id="ch-pts-time" role="img" aria-label="Cumulative points after each game"></canvas></div></section>
+        <section class="panel"><div class="panel-head"><h2><span class="pip pip-green"></span>Slice of the pie</h2><span class="entry-hint">Share of every point scored</span></div><div class="chart-box tall"><canvas id="ch-pts-share" role="img" aria-label="Share of all points"></canvas></div></section>
+      </div>`;
+  }
+
+  function afterPoints() {
+    if (!$('#ch-pts-time')) return;
+    if (!C.available()) {
+      $$('.chart-box').forEach((b) => (b.innerHTML = '<div class="chart-fallback">Charts need an internet connection to load. Everything else works offline.</div>'));
+      return;
+    }
+    const P = byId();
+    const stats = Object.values(L.playerStats(state)).filter((s) => s.rounds > 0);
+    C.pointsOverTime($('#ch-pts-time'), state.games, stats.map((s) => s.id), P);
+    C.pointsShare($('#ch-pts-share'), stats, P);
   }
 
   /* ----------------------------------------------------------------- TROPHIES */
@@ -947,7 +1103,7 @@
     return `<article class="game-card">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start">
         <div style="min-width:0"><h3>${esc(g.name)}</h3><span class="muted" style="font-size:.82rem;font-weight:700">${esc(new Date(g.createdAt).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }))} · ${plural(g.rounds.length, 'round')}</span></div>
-        ${g.status === 'finished' ? (L.isDraw(g) ? '<span class="pill pill-done">🤝 Draw</span>' : '<span class="pill pill-done">Finished</span>') : '<span class="pill pill-live">Live</span>'}
+        ${g.status === 'finished' ? (L.isDraw(g) ? '<span class="pill pill-done">🤝 Draw</span>' : '<span class="pill pill-done">Finished</span>') : g.status === 'paused' ? '<span class="pill pill-paused">⏸ Paused</span>' : '<span class="pill pill-live">Live</span>'}
       </div>
       <div class="mini-stand">${st
         .map(
@@ -955,8 +1111,8 @@
             `<div class="mini-row"><b>${row.rank}</b><span class="who">${avatar(P[row.id])}<span>${esc(P[row.id] ? P[row.id].name : '?')}${L.winnerOf(g) === row.id ? ' 🏆' : ''}</span></span><span class="num">${row.total}</span><div class="mini-bar pc-${esc(P[row.id] ? P[row.id].color : 'ink')}"><i style="width:${(Math.abs(row.total) / max) * 100}%"></i></div></div>`
         )
         .join('')}</div>
-      <div class="btn-row" ${canManage() ? '' : 'hidden'}>
-        <button type="button" class="btn ${g.status === 'active' ? 'btn-red' : 'btn-ink'} btn-small" data-action="open-game" data-game="${esc(g.id)}">${g.status === 'active' ? 'Resume' : 'Open'}</button>
+      <div class="btn-row">
+        <button type="button" class="btn ${g.status === 'finished' ? 'btn-ink' : 'btn-red'} btn-small" data-action="open-game" data-game="${esc(g.id)}">Open</button>
         ${isAdmin() || inGame(g) ? `<button type="button" class="btn btn-ghost btn-small" data-action="delete-game" data-game="${esc(g.id)}" aria-label="Delete ${esc(g.name)}">Delete</button>` : ''}
       </div>
     </article>`;
@@ -1300,8 +1456,9 @@
       <span class="brand-word">Tracker</span>
     </button>
     <nav class="tabs" aria-label="Sections">
-      <button type="button" class="tab c-red" data-action="go" data-view="play"><span class="tab-glyph">▶</span>Game</button>
+      <button type="button" class="tab c-red" data-action="go" data-view="play"><span class="tab-glyph">▶</span>Games<span class="tab-count" id="live-count" hidden></span></button>
       <button type="button" class="tab c-yellow" data-action="go" data-view="stats"><span class="tab-glyph">★</span>Stats</button>
+      <button type="button" class="tab c-wild" data-action="go" data-view="points"><span class="tab-glyph">#</span>Points</button>
       <button type="button" class="tab c-blue" data-action="go" data-view="trophies"><span class="tab-glyph">🏆</span>Trophies</button>
       <button type="button" class="tab c-green" data-action="go" data-view="players"><span class="tab-glyph">☺</span>Players</button>
     </nav>
@@ -1327,11 +1484,15 @@
 
   /* After a reload (a new version of the hosted page), put the viewer back where they were. */
   const bootUi = S.readUi();
-  loadedSeen = seenOf(state);
 
   function restoreUi() {
     if (!bootUi) return;
-    if (['play', 'stats', 'trophies', 'players'].includes(bootUi.view)) view = bootUi.view;
+    if (['play', 'stats', 'points', 'trophies', 'players'].includes(bootUi.view)) view = bootUi.view;
+    if (bootUi.focus === 'new' || (bootUi.focus && findGame(bootUi.focus))) focus = bootUi.focus;
+    if (bootUi.replay) {
+      pendingReplay = bootUi.replay;
+      replayTries = bootUi.replayTries || 1;
+    }
     compareIds = bootUi.compareIds || null;
     statsGameId = bootUi.statsGameId || null;
     if (bootUi.setup) setup = { ...bootUi.setup, sel: new Set(bootUi.setup.sel || []) };
@@ -1375,12 +1536,46 @@
   const actions = {
     go: (el) => {
       view = el.dataset.view;
+      if (view === 'play') focus = null;
       render();
       window.scrollTo({ top: 0, behavior: FX.reduced() ? 'auto' : 'smooth' });
     },
     'go-play': () => {
       view = 'play';
+      focus = canManage() ? 'new' : null;
       render();
+    },
+    'go-hub': () => {
+      view = 'play';
+      focus = null;
+      draft = null;
+      render();
+      window.scrollTo({ top: 0 });
+    },
+    'pause-game': (el) => {
+      const g = findGame(el.dataset.game);
+      if (!g || g.status !== 'active' || !canEditGame(g)) return;
+      draft = null;
+      if (focus === g.id) focus = null;
+      view = 'play';
+      commit((st) => {
+        const game = st.games.find((x) => x.id === g.id);
+        game.status = 'paused';
+        game.pausedAt = Date.now();
+      });
+      toast(`“${g.name}” is paused. Pick it back up from Tables any time.`);
+    },
+    'resume-game': (el) => {
+      const g = findGame(el.dataset.game);
+      if (!g || g.status !== 'paused' || !canEditGame(g)) return;
+      focus = g.id;
+      view = 'play';
+      commit((st) => {
+        const game = st.games.find((x) => x.id === g.id);
+        game.status = 'active';
+        game.resumedAt = Date.now();
+      });
+      toast('Back in action! Deal ’em.');
     },
     'close-modal': closeModal,
     mute: () => {
@@ -1398,6 +1593,7 @@
           state = S.emptyState();
           draft = setup = null;
           view = 'play';
+          focus = 'new';
           commit(() => {});
           const input = $('#setup-new');
           input && input.focus();
@@ -1433,13 +1629,61 @@
       if (me && !isAdmin()) s.sel.add(me);
       const ids = state.players.filter((p) => s.sel.has(p.id)).map((p) => p.id);
       if (ids.length < 2) return toast('Pick at least 2 players.');
-      startGame(ids, { name: (s.name || '').trim(), mode: s.mode, target: s.target });
-      toast('Cards are dealt. Good luck!');
+      const opts = { name: (s.name || '').trim(), mode: s.mode, target: s.target };
+      const busy = state.games.filter((g) => g.status === 'active' && g.playerIds.some((id) => ids.includes(id)));
+      if (!busy.length) {
+        startGame(ids, opts);
+        return toast('Cards are dealt. Good luck!');
+      }
+      const P = byId();
+      const lines = busy
+        .map((g) => `<li><strong>${esc(g.name)}</strong>: ${esc(listJoin(g.playerIds.filter((id) => ids.includes(id)).map((id) => (P[id] ? P[id].name : '?'))))} ${g.playerIds.filter((id) => ids.includes(id)).length === 1 ? 'is' : 'are'} still playing</li>`)
+        .join('');
+      const pausable = busy.filter((g) => canEditGame(g));
+      openModal(
+        `${modalHead('Some players are mid-game')}
+        <ul class="busy-list">${lines}</ul>
+        <p class="muted">${pausable.length ? 'Pause that game so you can pick it up later, or keep both going at once.' : 'You can keep both going at once.'}</p>
+        <div class="btn-row" style="justify-content:flex-end">
+          <button type="button" class="btn btn-ghost" id="busy-both">Keep both going</button>
+          ${pausable.length ? `<button type="button" class="btn btn-red" id="busy-pause">Pause ${pausable.length === 1 ? 'it' : 'them'} and start</button>` : ''}
+        </div>`,
+        {
+          label: 'Players mid-game',
+          onMount: (m) => {
+            $('#busy-both', m).addEventListener('click', () => {
+              closeModal();
+              startGame(ids, opts);
+              toast('Cards are dealt. Two tables on the go!');
+            });
+            const pb = $('#busy-pause', m);
+            pb &&
+              pb.addEventListener('click', () => {
+                closeModal();
+                const ids2 = pausable.map((g) => g.id);
+                commit(
+                  (st) =>
+                    st.games.forEach((g) => {
+                      if (ids2.includes(g.id)) {
+                        g.status = 'paused';
+                        g.pausedAt = Date.now();
+                      }
+                    }),
+                  { render: false }
+                );
+                startGame(ids, opts);
+                toast(`Paused ${listJoin(pausable.map((g) => `“${g.name}”`))}. New game dealt!`);
+              });
+          },
+        }
+      );
     },
     'new-game': () => {
       closeModal();
+      if (!canManage()) return;
       setup = null;
-      commit((s) => (s.activeGameId = null), { render: false });
+      draft = null;
+      focus = 'new';
       view = 'play';
       render();
       window.scrollTo({ top: 0 });
@@ -1452,8 +1696,9 @@
       toast('Rematch! Same players, fresh deck.');
     },
     'open-game': (el) => {
+      if (!findGame(el.dataset.game)) return;
       draft = null;
-      commit((s) => (s.activeGameId = el.dataset.game), { render: false });
+      focus = el.dataset.game;
       view = 'play';
       render();
       window.scrollTo({ top: 0 });
@@ -1466,10 +1711,10 @@
         body: `This removes ${plural(g.rounds.length, 'round')} and their stats for good.`,
         ok: 'Delete game',
         onOk: () =>
-          commit((s) => {
-            s.games = s.games.filter((x) => x.id !== g.id);
-            if (s.activeGameId === g.id) s.activeGameId = null;
-          }),
+          {
+            if (focus === g.id) focus = null;
+            commit((s) => (s.games = s.games.filter((x) => x.id !== g.id)));
+          },
       });
     },
     'submit-round': () => guardGame() && submitRound(),
@@ -1515,10 +1760,8 @@
         onOk: () => {
           draft = null;
           setup = null;
-          commit((st) => {
-            st.games = st.games.filter((x) => x.id !== g.id);
-            if (st.activeGameId === g.id) st.activeGameId = null;
-          });
+          focus = null;
+          commit((st) => (st.games = st.games.filter((x) => x.id !== g.id)));
           toast('Game discarded. It never happened.');
         },
       });
@@ -1567,9 +1810,14 @@
 
   mountShell();
   restoreUi();
+  loadedSeen = seenOf(state);
   render();
   afterBoot();
-  addEventListener('pagehide', () => stash());
+  // A reload can land before this view's save went out (another table saved first): keep the change.
+  addEventListener('pagehide', () => {
+    const diff = dirty ? diffFromBaseline() : null;
+    stash(diff && replayTries < 3 ? { replay: diff, replayTries: replayTries + 1 } : {});
+  });
 
   if (HOSTED) {
     Promise.all([window.claude.use('user'), window.claude.use('artifact')])
@@ -1582,7 +1830,24 @@
         } catch (e) {}
         artifactApi = art;
         role = editor ? 'editor' : 'viewer';
-        if (editor && !EMBEDDED) state = window.UnoDemo.build(L); // brand-new page: show the demo until the first change
+        if (editor && !EMBEDDED) {
+          state = window.UnoDemo.build(L); // brand-new page: show the demo until the first change
+          baseline = null;
+        }
+        const replay = editor && EMBEDDED ? pendingReplay : null;
+        pendingReplay = null;
+        if (replay) {
+          // Another table saved at the same moment as this one: put this view's changes back on top.
+          const before = JSON.stringify(state);
+          applyReplay(replay);
+          if (JSON.stringify(state) !== before) {
+            dirty = true;
+            schedulePublish();
+            toast('Another table saved at the same moment. Your change is being saved again.');
+          }
+        } else {
+          replayTries = 0;
+        }
         render();
       })
       .catch(() => {

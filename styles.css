@@ -746,6 +746,30 @@ tfoot td { font: 400 1.1rem/1 var(--f-display); background: var(--surface-2); bo
 .pts-cell { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-width: 160px; }
 .pts-bar { flex: 1; max-width: 140px; height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
 .pts-bar i { display: block; height: 100%; border-radius: inherit; background: var(--pc); }
+.pts-table tr.pts-top td { font-weight: 800; }
+.pts-table .rank-num { min-width: 1.4em; display: inline-block; text-align: center; }
+.points-teaser .panel-head { flex-wrap: wrap; gap: 10px; }
+
+/* ------------------------------------------------- tables lobby and pause */
+.tab-count { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--red); color: #fff; font-size: 0.72rem; line-height: 20px; text-align: center; }
+.pill-paused { background: color-mix(in srgb, var(--yellow) 18%, var(--surface)); border-color: color-mix(in srgb, var(--yellow) 50%, transparent); color: var(--fg); }
+.back-link { display: inline-block; margin-bottom: 10px; font-size: 0.92rem; }
+.tables { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 16px; }
+.table-card { background: var(--surface); border: 1px solid var(--line); border-left: 6px solid var(--red); border-radius: var(--r-lg); padding: 16px; display: grid; gap: 12px; box-shadow: var(--shadow); min-width: 0; }
+.table-card.is-paused { border-left-color: var(--yellow); background: color-mix(in srgb, var(--yellow) 5%, var(--surface)); }
+.table-card.is-mine { box-shadow: var(--shadow), 0 0 0 2px color-mix(in srgb, var(--red) 35%, transparent); }
+.table-card.is-paused.is-mine { box-shadow: var(--shadow), 0 0 0 2px color-mix(in srgb, var(--yellow) 45%, transparent); }
+.table-card h3 { overflow-wrap: anywhere; }
+.table-top { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
+.table-sub { display: block; font-size: 0.82rem; font-weight: 700; }
+.table-you { justify-self: start; margin: 0; }
+.table-score { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.table-player { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 4px; border-radius: 999px; background: color-mix(in srgb, var(--pc) 12%, var(--surface-2)); min-width: 0; }
+.table-player .avatar { width: 28px; height: 28px; font-size: 0.9rem; box-shadow: none; }
+.table-name { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 9em; }
+.table-player b { font: 400 1.3rem/1 var(--f-display); }
+.table-vs { font: 400 0.85rem/1 var(--f-display); color: var(--muted); }
+.busy-list { margin: 0 0 12px; padding-left: 1.2em; display: grid; gap: 6px; }
 
 /* player color variants */
 .pc-red { --pc: var(--red); --pd: var(--red-deep); --pi: #fff; }
