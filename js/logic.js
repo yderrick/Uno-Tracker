@@ -78,12 +78,26 @@
   }
   const standings = (game) => standingsAfter(game, game.rounds.length);
 
+  /** Level at the top (2-2, 0-0...)? A drawn game has no winner and no loser. */
+  function tiedAtTop(game) {
+    const st = standings(game);
+    return st.length > 1 && st[0].total === st[1].total;
+  }
+
   /** Has anyone reached the target? Games without a target only end when finished by hand. */
   function checkOver(game) {
-    if (!game.target || !game.rounds.length) return { over: false, winnerId: null };
+    if (!game.target || !game.rounds.length) return { over: false, winnerId: null, draw: false };
     const reached = Object.values(totals(game)).some((v) => v >= game.target);
-    return reached ? { over: true, winnerId: standings(game)[0].id } : { over: false, winnerId: null };
+    if (!reached) return { over: false, winnerId: null, draw: false };
+    const draw = tiedAtTop(game);
+    return { over: true, winnerId: draw ? null : standings(game)[0].id, draw };
   }
+
+  /** A finished game that ended level counts as a draw for everyone, whatever was saved before. */
+  const isDraw = (game) => game.status === 'finished' && (!!game.draw || tiedAtTop(game));
+
+  /** The winner of a finished game, or null for draws and games still going. */
+  const winnerOf = (game) => (game.status !== 'finished' || isDraw(game) ? null : game.winnerId || standings(game)[0].id);
 
   const played = (r, id) => r.points && id in r.points;
 
@@ -302,6 +316,12 @@
       '{w} wins it by {marginW}! Photo finish. Lawyers have been called.',
       'By a whisker! {w} edges it by {marginW}.',
     ],
+    gameOverDraw: [
+      'It’s a DRAW! {p} can’t be separated at {t}. Nobody wins, nobody loses, everybody sulks.',
+      'Honours even at {t}! {p} shake hands (reluctantly).',
+      'A draw at {t}. The cards have spoken, and they said “meh”.',
+      'Stalemate! {p} finish level on {t}. Rematch, obviously.',
+    ],
     gameOverBlowout: [
       '{w} wins by {marginW}. That wasn’t a game, it was a lesson.',
       'A {marginW} victory for {w}. Mercy rules were discussed.',
@@ -413,6 +433,11 @@
   function gameOverLine(game, names, rng = Math.random) {
     const st = standings(game);
     const top = st[0];
+    if (st.length > 1 && st[1].total === top.total) {
+      const level = st.filter((r) => r.total === top.total).map((r) => names[r.id] || 'Someone');
+      const p = level.length <= 1 ? level.join('') : `${level.slice(0, -1).join(', ')} and ${level[level.length - 1]}`;
+      return fill(pickFrom(rng)(LINES.gameOverDraw), { p, t: `${top.total}–${top.total}` });
+    }
     const margin = st[1] ? Math.abs(top.total - st[1].total) : 0;
     const tops = game.rounds.map((x) => Math.max(0, ...Object.values(x.points || {}).map(num)));
     const avgTop = tops.reduce((a, b) => a + b, 0) / Math.max(1, tops.length);
@@ -454,60 +479,103 @@
     state.players.forEach((p) => {
       stats[p.id] = {
         id: p.id,
+        createdAt: p.createdAt || 0,
         games: 0,
         finished: 0,
         wins: 0,
+        draws: 0,
+        losses: 0,
+        points: 0,
         seconds: 0,
         lastPlaces: 0,
         rounds: 0,
         roundsWon: 0,
         bestRound: 0,
+        bestGame: 0,
         biggestHit: 0,
         totalPoints: 0,
         zeroRounds: 0,
+        zeroRun: 0,
         earlyWins: 0,
         nightRounds: 0,
+        morningRounds: 0,
+        weekendRounds: 0,
         roundsLed: 0,
+        leadsTaken: 0,
         comebackWins: 0,
+        slowBurnWins: 0,
+        wireToWire: 0,
+        cleanSheets: 0,
+        closeWins: 0,
+        bagels: 0,
         ledButLost: 0,
         longestStreak: 0,
         longestDrought: 0,
+        gameStreak: 0,
+        lossStreak: 0,
+        unbeaten: 0,
         fastestWin: null,
         longestWin: null,
         closestWin: null,
         biggestWin: null,
         highScores: [],
         lowScores: [],
+        results: [],
         lastPlayed: 0,
       };
     });
-    state.games.forEach((g) => {
+    const ordered = [...state.games].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    ordered.forEach((g) => {
       const st = standings(g);
+      const tot = totals(g);
       const high = higherWins(g);
       const finished = g.status === 'finished';
+      const draw = isDraw(g);
+      const winner = winnerOf(g);
       const led = new Set();
       const wasLast = new Set();
+      const ledEvery = {};
+      let prevLeader = null;
       for (let i = 1; i <= g.rounds.length; i++) {
-        const s = standingsAfter(g, i);
-        if (s.length > 1 && s[0].total !== s[1].total) {
-          led.add(s[0].id);
-          if (stats[s[0].id]) stats[s[0].id].roundsLed++;
+        const sAfter = standingsAfter(g, i);
+        const unique = sAfter.length > 1 && sAfter[0].total !== sAfter[1].total;
+        const leader = unique ? sAfter[0].id : null;
+        g.playerIds.forEach((id) => (ledEvery[id] = (ledEvery[id] === undefined ? true : ledEvery[id]) && leader === id));
+        if (leader) {
+          led.add(leader);
+          if (stats[leader]) stats[leader].roundsLed++;
+          if (prevLeader !== leader && i > 1 && stats[leader]) stats[leader].leadsTaken++;
         }
-        const last = s[s.length - 1];
-        if (s.length > 1 && i >= 2 && s[s.length - 2].total !== last.total) wasLast.add(last.id);
+        prevLeader = leader || prevLeader;
+        const last = sAfter[sAfter.length - 1];
+        if (sAfter.length > 1 && i >= 2 && sAfter[sAfter.length - 2].total !== last.total) wasLast.add(last.id);
       }
+      const half = Math.floor(g.rounds.length / 2);
+      const halfLeader = (() => {
+        if (half < 2) return undefined;
+        const sh = standingsAfter(g, half);
+        return sh.length > 1 && sh[0].total !== sh[1].total ? sh[0].id : null;
+      })();
       g.playerIds.forEach((id) => {
         const s = stats[id];
         if (!s) return;
         s.games++;
+        s.points += tot[id] || 0;
+        if (high) s.bestGame = Math.max(s.bestGame, tot[id] || 0);
         s.lastPlayed = Math.max(s.lastPlayed, g.finishedAt || g.createdAt || 0);
         s.longestStreak = Math.max(s.longestStreak, longestStreak(g, id));
         s.longestDrought = Math.max(s.longestDrought, longestDrought(g, id));
         if (!finished) return;
         s.finished++;
+        if (draw) {
+          s.draws++;
+          s.results.push('D');
+          return;
+        }
         const row = st.find((x) => x.id === id);
-        if (g.winnerId === id) {
+        if (winner === id) {
           s.wins++;
+          s.results.push('W');
           const n = g.rounds.length;
           const margin = st[1] ? Math.abs(st[0].total - st[1].total) : 0;
           s.fastestWin = s.fastestWin == null ? n : Math.min(s.fastestWin, n);
@@ -515,16 +583,26 @@
           if (st.length > 1) {
             s.closestWin = s.closestWin == null ? margin : Math.min(s.closestWin, margin);
             s.biggestWin = s.biggestWin == null ? margin : Math.max(s.biggestWin, margin);
+            if (margin <= 1) s.closeWins++;
           }
           if (wasLast.has(id)) s.comebackWins++;
+          if (halfLeader !== undefined && halfLeader !== id) s.slowBurnWins++;
+          if (g.rounds.length >= 3 && ledEvery[id]) s.wireToWire++;
+          if (high && g.playerIds.every((o) => o === id || (tot[o] || 0) === 0)) s.cleanSheets++;
         } else {
+          s.losses++;
+          s.results.push('L');
           if (st.length > 1 && st[1].id === id) s.seconds++;
           if (led.has(id)) s.ledButLost++;
+          if (high && (tot[id] || 0) === 0) s.bagels++;
         }
-        if (st.length > 2 && row && row === st[st.length - 1] && g.winnerId !== id) s.lastPlaces++;
+        if (st.length > 2 && row && row === st[st.length - 1] && winner !== id) s.lastPlaces++;
       });
+      const zeroRuns = {};
       g.rounds.forEach((r, ri) => {
-        const hour = r.at ? new Date(r.at).getHours() : 12;
+        const when = r.at ? new Date(r.at) : null;
+        const hour = when ? when.getHours() : 12;
+        const day = when ? when.getDay() : 3;
         const anyScored = Object.values(r.points || {}).some((v) => num(v) > 0);
         Object.entries(r.points || {}).forEach(([id, p]) => {
           const s = stats[id];
@@ -536,11 +614,17 @@
             if (ri === 0) s.earlyWins++;
           }
           if (hour >= 22 || hour < 4) s.nightRounds++;
+          if (hour >= 4 && hour < 10) s.morningRounds++;
+          if (day === 0 || day === 6) s.weekendRounds++;
           if (high) {
             s.bestRound = Math.max(s.bestRound, v);
             s.totalPoints += v;
             s.highScores.push(v);
-            if (v === 0 && anyScored) s.zeroRounds++;
+            if (v === 0 && anyScored) {
+              s.zeroRounds++;
+              zeroRuns[id] = (zeroRuns[id] || 0) + 1;
+              s.zeroRun = Math.max(s.zeroRun, zeroRuns[id]);
+            } else zeroRuns[id] = 0;
           } else {
             s.biggestHit = Math.max(s.biggestHit, v);
             s.lowScores.push(v);
@@ -554,12 +638,23 @@
       const m = mean(a);
       return Math.sqrt(mean(a.map((x) => (x - m) ** 2)));
     };
+    const longestRun = (arr, ok) => {
+      let best = 0;
+      let run = 0;
+      arr.forEach((x) => (ok(x) ? (best = Math.max(best, ++run)) : (run = 0)));
+      return best;
+    };
     Object.values(stats).forEach((s) => {
+      s.decided = s.wins + s.losses;
       s.winRate = s.finished ? s.wins / s.finished : 0;
       s.roundWinRate = s.rounds ? s.roundsWon / s.rounds : 0;
+      s.avgPerGame = s.games ? s.points / s.games : 0;
       s.avgHigh = mean(s.highScores);
       s.avgLow = mean(s.lowScores);
       s.spread = sd(s.highScores);
+      s.gameStreak = longestRun(s.results, (r) => r === 'W');
+      s.lossStreak = longestRun(s.results, (r) => r === 'L');
+      s.unbeaten = longestRun(s.results, (r) => r !== 'L');
     });
     return stats;
   }
@@ -567,44 +662,104 @@
   /* -------------------------------------------------------------------- trophies */
 
   const fmt1 = (v) => (Math.round(v * 10) / 10).toString();
+  const pct = (v) => `${Math.round(v * 100)}%`;
+  const shortDate = (ts) => new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 
   /**
    * Every trophy, earned or up for grabs:
    * {key, icon, title, quip (with {name}/{value}), how, holders: [ids], value (text) | null}.
-   * best: higher value wins unless `lowest`; `min` is the smallest value that earns it.
+   * fn(stats) gives each player a number: highest wins unless `lowest`; `min` is the
+   * smallest value that earns it. `custom(state, stats)` picks holders itself.
    */
   const TROPHIES = [
     { key: 'champ', icon: '👑', title: 'The Uno-Disputed Champion', how: 'Win the most games.', quip: '{name} has won {value}. The rest of you are just here for the snacks.', fn: (s) => s.wins, fmt: (v) => plural(v, 'game') },
+    { key: 'pointmachine', icon: '🏦', title: 'The Point Bank', how: 'Score the most points across every game.', quip: '{name} has banked {value} all-time. Interest rates are rising.', fn: (s) => s.points, fmt: (v) => plural(v, 'point') },
     { key: 'roundhog', icon: '🐗', title: 'Round Hog', how: 'Win the most rounds.', quip: '{name} has hogged {value}. Sharing is caring, apparently not.', fn: (s) => s.roundsWon, fmt: (v) => plural(v, 'round') },
+    { key: 'serial', icon: '🏅', title: 'Serial Winner', how: 'Win 2+ games in a row. Longest run takes it.', quip: '{name} won {value} back to back. Someone call the authorities.', fn: (s) => s.gameStreak, fmt: (v) => plural(v, 'game'), min: 2 },
+    { key: 'unbeaten', icon: '🛡️', title: 'The Unbreakable', how: 'Go the most games in a row without a loss.', quip: '{name} went {value} without losing. Wins and draws only, thank you.', fn: (s) => s.unbeaten, fmt: (v) => plural(v, 'game'), min: 2 },
+    { key: 'lucky', icon: '🍀', title: 'Lucky Charm', how: 'Best game win rate (3+ finished games).', quip: '{name} wins {value} of their games. Rub them for luck.', fn: (s) => (s.finished >= 3 ? s.winRate : null), fmt: pct },
+    { key: 'sniper', icon: '🎯', title: 'The Sniper', how: 'Best round win rate (10+ rounds).', quip: '{name} wins {value} of rounds. Never misses.', fn: (s) => (s.rounds >= 10 ? s.roundWinRate : null), fmt: pct },
     { key: 'heist', icon: '💰', title: 'Daylight Robbery', how: 'Score the most points in a single round.', quip: '{name} pocketed {value} in one round. Check their sleeves.', fn: (s) => s.bestRound, fmt: (v) => plural(v, 'point') },
+    { key: 'bigbang', icon: '💥', title: 'Big Bang', how: 'Score the most points in a single game.', quip: '{name} put up {value} in one game. The table is still smoking.', fn: (s) => s.bestGame, fmt: (v) => plural(v, 'point') },
     { key: 'streak', icon: '🔥', title: 'Hotter Than a Draw Four', how: 'Win 2+ rounds in a row. Longest streak takes it.', quip: '{name} won {value} in a row. Somebody unplug them.', fn: (s) => s.longestStreak, fmt: (v) => plural(v, 'round'), min: 2 },
     { key: 'leadmagnet', icon: '🧲', title: 'Lead Magnet', how: 'Sit alone in first place after the most rounds.', quip: '{name} has been top of the table for {value}. Comfy up there?', fn: (s) => s.roundsLed, fmt: (v) => plural(v, 'round') },
+    { key: 'thief', icon: '🦹', title: 'Lead Thief', how: 'Snatch the lead from someone else the most times.', quip: '{name} has stolen the lead {value}. Lock up your points.', fn: (s) => s.leadsTaken, fmt: (v) => plural(v, 'time') },
+    { key: 'wire', icon: '🏁', title: 'Wire to Wire', how: 'Lead after every single round of a game (3+ rounds) and win it.', quip: '{name} led from start to finish {value}. Never even looked back.', fn: (s) => s.wireToWire, fmt: (v) => plural(v, 'time') },
     { key: 'comeback', icon: '🚀', title: 'The Comeback Kid', how: 'Win a game after being in last place.', quip: '{name} was dead last and still won {value}. Never count them out.', fn: (s) => s.comebackWins, fmt: (v) => plural(v, 'game') },
+    { key: 'slowburn', icon: '🕯️', title: 'Slow Burner', how: 'Win a game you weren’t leading at halfway.', quip: '{name} saved the best for last {value}. Pacing is an art.', fn: (s) => s.slowBurnWins, fmt: (v) => plural(v, 'time') },
+    { key: 'cleansheet', icon: '🧹', title: 'Clean Sheet', how: 'Win a game where nobody else scored a single point.', quip: '{name} won {value} without conceding a point. Ruthless.', fn: (s) => s.cleanSheets, fmt: (v) => plural(v, 'game') },
     { key: 'steamroller', icon: '🚜', title: 'The Steamroller', how: 'Win a game by the biggest margin.', quip: '{name} won by {value}. That wasn’t a game, it was a lesson.', fn: (s) => s.biggestWin, fmt: (v) => plural(v, 'point') },
     { key: 'photo', icon: '📸', title: 'Photo Finish', how: 'Win a game by the smallest margin.', quip: '{name} won by {value}. Lawyers were consulted.', fn: (s) => s.closestWin, fmt: (v) => plural(v, 'point'), lowest: true },
+    { key: 'ice', icon: '🧊', title: 'Ice in the Veins', how: 'Win the most games by a single point (or less).', quip: '{name} has won {value} by a whisker. Pulse never went above 60.', fn: (s) => s.closeWins, fmt: (v) => plural(v, 'nail-biter') },
     { key: 'speedrun', icon: '🏎️', title: 'Speed Run', how: 'Win a game in the fewest rounds.', quip: '{name} won a whole game in {value}. Blink and you missed it.', fn: (s) => s.fastestWin, fmt: (v) => plural(v, 'round'), lowest: true },
     { key: 'marathon', icon: '🐌', title: 'Marathon Survivor', how: 'Win the longest game.', quip: '{name} outlasted everyone in a game that went {value}. Legs are gone.', fn: (s) => s.longestWin, fmt: (v) => plural(v, 'round') },
     { key: 'average', icon: '📈', title: 'Mean Machine', how: 'Best average score per round (5+ rounds, highest-wins games).', quip: '{name} averages {value} a round. Mean as in average. And as in mean.', fn: (s) => (s.highScores.length >= 5 ? s.avgHigh : null), fmt: (v) => fmt1(v) },
-    { key: 'accountant', icon: '🧮', title: 'The Accountant', how: 'Score the most points all-time.', quip: '{name} has racked up {value}. Numbers don’t lie, but they do brag.', fn: (s) => s.totalPoints, fmt: (v) => plural(v, 'point') },
-    { key: 'metronome', icon: '🎯', title: 'The Metronome', how: 'Most consistent scores, round after round (5+ rounds).', quip: '{name} barely changes. Boring? Maybe. Terrifying? Definitely.', fn: (s) => (s.highScores.length >= 5 ? s.spread : null), fmt: (v) => `±${fmt1(v)}`, lowest: true },
+    { key: 'accountant', icon: '🧮', title: 'The Accountant', how: 'Best average points per game (3+ games).', quip: '{name} brings {value} a game. Numbers don’t lie, but they do brag.', fn: (s) => (s.games >= 3 ? s.avgPerGame : null), fmt: (v) => fmt1(v) },
+    { key: 'metronome', icon: '⏱️', title: 'The Metronome', how: 'Most consistent scores, round after round (5+ rounds).', quip: '{name} barely changes. Boring? Maybe. Terrifying? Definitely.', fn: (s) => (s.highScores.length >= 5 ? s.spread : null), fmt: (v) => `±${fmt1(v)}`, lowest: true },
     { key: 'rollercoaster', icon: '🎢', title: 'Rollercoaster Rider', how: 'Wildest swings between rounds (5+ rounds).', quip: '{name} is either feast or famine. Mostly drama.', fn: (s) => (s.highScores.length >= 5 ? s.spread : null), fmt: (v) => `±${fmt1(v)}` },
     { key: 'earlybird', icon: '🐣', title: 'Early Bird', how: 'Win the first round of the most games.', quip: '{name} won round one {value}. Strong starts, questionable finishes?', fn: (s) => s.earlyWins, fmt: (v) => plural(v, 'time') },
+    { key: 'peace', icon: '🕊️', title: 'The Peacekeeper', how: 'Finish the most games in a draw.', quip: '{name} has drawn {value}. Can’t lose if you don’t win, right?', fn: (s) => s.draws, fmt: (v) => plural(v, 'game') },
     { key: 'bridesmaid', icon: '🥈', title: 'Always the Bridesmaid', how: 'Finish second the most.', quip: '{name} finished second {value}. So close you can taste it.', fn: (s) => s.seconds, fmt: (v) => plural(v, 'time') },
     { key: 'choker', icon: '🫠', title: 'So Close, Yet So Uno', how: 'Lead a game at some point, then lose it.', quip: '{name} led {value} and didn’t win. It’s fine. Everything’s fine.', fn: (s) => s.ledButLost, fmt: (v) => plural(v, 'game') },
+    { key: 'cursed', icon: '🐈‍⬛', title: 'Cursed', how: 'Lose 2+ games in a row. Longest run takes it.', quip: '{name} lost {value} in a row. Has anyone checked for a black cat?', fn: (s) => s.lossStreak, fmt: (v) => plural(v, 'game'), min: 2 },
+    { key: 'waiting', icon: '⏳', title: 'Still Waiting', how: 'Play the most finished games without winning one.', quip: '{name} has played {value} and is still waiting for that first win. It’s coming. Probably.', fn: (s) => (s.wins === 0 ? s.finished : null), fmt: (v) => plural(v, 'game') },
+    { key: 'sloth', icon: '🦥', title: 'The Sloth', how: 'Lowest round win rate (10+ rounds).', quip: '{name} wins {value} of rounds. Conserving energy for something.', fn: (s) => (s.rounds >= 10 ? s.roundWinRate : null), fmt: pct, lowest: true },
     { key: 'goose', icon: '🥚', title: 'Goose Egg Collector', how: 'Score zero while someone else scores.', quip: '{name} has scored zero {value}. Eggs-traordinary.', fn: (s) => s.zeroRounds, fmt: (v) => plural(v, 'time') },
-    { key: 'iceage', icon: '🧊', title: 'Ice Age', how: 'Go the longest without winning a round (3+).', quip: '{name} once went {value} without a win. We never stopped believing.', fn: (s) => s.longestDrought, fmt: (v) => plural(v, 'round'), min: 3 },
+    { key: 'snooze', icon: '😴', title: 'Snooze Button', how: 'Score zero in the most rounds in a row (3+).', quip: '{name} scored zero {value} straight. Wake up!', fn: (s) => s.zeroRun, fmt: (v) => plural(v, 'round'), min: 3 },
+    { key: 'bagel', icon: '🥯', title: 'The Bagel', how: 'Finish a game with zero points.', quip: '{name} finished {value} with a big round zero. Toasted.', fn: (s) => s.bagels, fmt: (v) => plural(v, 'game') },
+    { key: 'iceage', icon: '🦣', title: 'Ice Age', how: 'Go the longest without winning a round (3+).', quip: '{name} once went {value} without a win. We never stopped believing.', fn: (s) => s.longestDrought, fmt: (v) => plural(v, 'round'), min: 3 },
     { key: 'participation', icon: '🐢', title: 'Participation Trophy', how: 'Finish last the most (games with 3+ players).', quip: '{name} came last {value}. Showing up is half the battle.', fn: (s) => s.lastPlaces, fmt: (v) => plural(v, 'time') },
     { key: 'ouch', icon: '🩹', title: 'Ouch, My Hand', how: 'Take the biggest hit in a lowest-wins game.', quip: '{name} ate {value} in one round. Thoughts and prayers.', fn: (s) => s.biggestHit, fmt: (v) => plural(v, 'point') },
     { key: 'teflon', icon: '😇', title: 'Teflon', how: 'Lowest average per round in lowest-wins games (4+ rounds).', quip: 'Nothing sticks to {name}: just {value} a round.', fn: (s) => (s.lowScores.length >= 4 ? s.avgLow : null), fmt: (v) => fmt1(v), lowest: true },
     { key: 'nightowl', icon: '🦉', title: 'Night Owl', how: 'Play the most rounds after 10pm.', quip: '{name} has played {value} after 10pm. Go to bed.', fn: (s) => s.nightRounds, fmt: (v) => plural(v, 'round') },
+    { key: 'earlyriser', icon: '🌅', title: 'Breakfast of Champions', how: 'Play the most rounds before 10am.', quip: '{name} has played {value} before 10am. Cereal and Draw Fours.', fn: (s) => s.morningRounds, fmt: (v) => plural(v, 'round') },
+    { key: 'weekend', icon: '🛋️', title: 'Weekend Warrior', how: 'Play the most rounds on Saturdays and Sundays.', quip: '{name} has spent {value} of their weekends here. No regrets.', fn: (s) => s.weekendRounds, fmt: (v) => plural(v, 'round') },
     { key: 'shuffler', icon: '🃏', title: 'Professional Shuffler', how: 'Play the most rounds.', quip: '{value} and counting. {name} basically lives here now.', fn: (s) => s.rounds, fmt: (v) => plural(v, 'round') },
     { key: 'regular', icon: '🎟️', title: 'Season Ticket Holder', how: 'Play the most games.', quip: '{name} has shown up for {value}. That’s loyalty.', fn: (s) => s.games, fmt: (v) => plural(v, 'game') },
+    {
+      key: 'reigning', icon: '🎖️', title: 'Reigning Champ', how: 'Win the most recent finished game.',
+      quip: '{name} won the last game ({value}). Enjoy it while it lasts.',
+      custom: (state) => {
+        const g = [...state.games].filter((x) => winnerOf(x)).sort((a, b) => (b.finishedAt || b.createdAt || 0) - (a.finishedAt || a.createdAt || 0))[0];
+        return g ? { holders: [winnerOf(g)], value: g.name } : null;
+      },
+    },
+    {
+      key: 'founder', icon: '🏛️', title: 'The Founding Father', how: 'Win the very first game ever recorded.',
+      quip: '{name} won the first ever game ({value}). History remembers.',
+      custom: (state) => {
+        const g = [...state.games].filter((x) => winnerOf(x)).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))[0];
+        return g ? { holders: [winnerOf(g)], value: g.name } : null;
+      },
+    },
+    {
+      key: 'og', icon: '🦕', title: 'The OG', how: 'Be the first player to join the table.',
+      quip: '{name} has been here since {value}. Respect your elders.',
+      custom: (state, all) => {
+        if (all.length < 2) return null;
+        const s = [...all].sort((a, b) => a.createdAt - b.createdAt)[0];
+        return s.createdAt ? { holders: [s.id], value: shortDate(s.createdAt) } : null;
+      },
+    },
+    {
+      key: 'fresh', icon: '🍼', title: 'Fresh Meat', how: 'Be the newest player to sit down.',
+      quip: '{name} joined on {value}. Be gentle. Or don’t.',
+      custom: (state, all) => {
+        if (all.length < 2) return null;
+        const s = [...all].sort((a, b) => b.createdAt - a.createdAt)[0];
+        return s.createdAt ? { holders: [s.id], value: shortDate(s.createdAt) } : null;
+      },
+    },
   ];
 
   function trophies(state) {
     const all = Object.values(playerStats(state)).filter((s) => s.rounds > 0);
     const order = Object.fromEntries(state.players.map((p, i) => [p.id, i]));
     return TROPHIES.map((t) => {
+      if (t.custom) {
+        const r = all.length ? t.custom(state, all) : null;
+        return r && r.holders.every((id) => id in order) ? { ...t, ...r } : { ...t, holders: [], value: null };
+      }
       const scored = all.map((s) => [s.id, t.fn(s)]).filter(([, v]) => v != null && (t.lowest ? true : v >= (t.min || 1)));
       if (!scored.length) return { ...t, holders: [], value: null };
       const best = t.lowest ? Math.min(...scored.map((x) => x[1])) : Math.max(...scored.map((x) => x[1]));
@@ -615,13 +770,13 @@
       // A 'lowest' trophy shared by everyone says nothing; leave it up for grabs.
       if (t.lowest && holders.length === all.length && all.length > 1) return { ...t, holders: [], value: null };
       return { ...t, holders, value: t.fmt(best) };
-    }).map(({ fn, fmt, ...rest }) => rest);
+    }).map(({ fn, fmt, custom, ...rest }) => rest);
   }
 
   /** Earned trophies only (kept for older callers). */
   const awards = (state) => trophies(state).filter((t) => t.holders.length).map((t) => ({ ...t, winnerId: t.holders[0] }));
 
-  /** wins[a][b] = finished games where a placed above b (both played). */
+  /** wins[a][b] = finished, decided games where a placed above b (both played). Draws don't count. */
   function headToHead(state) {
     const m = {};
     state.players.forEach((a) => {
@@ -629,11 +784,12 @@
       state.players.forEach((b) => (m[a.id][b.id] = 0));
     });
     state.games
-      .filter((g) => g.status === 'finished')
+      .filter((g) => winnerOf(g))
       .forEach((g) => {
         const st = standings(g);
         const pos = {};
-        st.forEach((row, i) => (pos[row.id] = row.id === g.winnerId ? -1 : row.rank + i / 1000));
+        const w = winnerOf(g);
+        st.forEach((row, i) => (pos[row.id] = row.id === w ? -1 : row.rank + i / 1000));
         g.playerIds.forEach((a) =>
           g.playerIds.forEach((b) => {
             if (a !== b && m[a] && m[a][b] !== undefined && pos[a] < pos[b]) m[a][b]++;
@@ -652,6 +808,9 @@
     standings,
     standingsAfter,
     checkOver,
+    tiedAtTop,
+    isDraw,
+    winnerOf,
     currentStreak,
     longestStreak,
     longestDrought,

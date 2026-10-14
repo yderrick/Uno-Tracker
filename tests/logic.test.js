@@ -37,8 +37,8 @@ test('ties share a rank', () => {
 });
 
 test('a game ends when anyone reaches the target, never when there is no target', () => {
-  assert.deepEqual(L.checkOver(game('high', 100, [{ a: 60, b: 101, c: 0 }])), { over: true, winnerId: 'b' });
-  assert.deepEqual(L.checkOver(game('low', 100, [{ a: 120, b: 50, c: 30 }])), { over: true, winnerId: 'c' });
+  assert.deepEqual(L.checkOver(game('high', 100, [{ a: 60, b: 101, c: 0 }])), { over: true, winnerId: 'b', draw: false });
+  assert.deepEqual(L.checkOver(game('low', 100, [{ a: 120, b: 50, c: 30 }])), { over: true, winnerId: 'c', draw: false });
   assert.equal(L.checkOver(game('high', null, [{ a: 9999, b: 0 }])).over, false);
   assert.equal(L.checkOver(game('high', 500, [{ a: 10, b: 0 }])).over, false);
 });
@@ -112,4 +112,37 @@ test('head to head counts who finished above whom', () => {
   const h = L.headToHead({ players: [{ id: 'a' }, { id: 'b' }], games: [g] });
   assert.equal(h.a.b, 1);
   assert.equal(h.b.a, 0);
+});
+
+test('a game that ends level is a draw: no winner, no loser', () => {
+  const g = game('high', 10, [{ a: 3, b: 3 }], ['a', 'b']);
+  g.status = 'finished';
+  g.winnerId = 'a'; // saved before draws existed
+  assert.equal(L.isDraw(g), true);
+  assert.equal(L.winnerOf(g), null);
+  const state = { players: [{ id: 'a' }, { id: 'b' }], games: [g] };
+  const s = L.playerStats(state);
+  assert.deepEqual([s.a.wins, s.a.draws, s.a.losses], [0, 1, 0]);
+  assert.deepEqual([s.b.wins, s.b.draws, s.b.losses], [0, 1, 0]);
+  assert.equal(L.headToHead(state).a.b, 0);
+  const zero = game('high', 10, [{ a: 0, b: 0 }], ['a', 'b']);
+  zero.status = 'finished';
+  assert.equal(L.isDraw(zero), true);
+  assert.deepEqual(L.checkOver(game('high', 10, [{ a: 10, b: 10 }], ['a', 'b'])), { over: true, winnerId: null, draw: true });
+  assert.match(L.gameOverLine(game('high', 10, [{ a: 10, b: 10 }], ['a', 'b']), { a: 'Ann', b: 'Bo' }, () => 0), /Ann and Bo|10–10/);
+});
+
+test('cumulative points and win / draw / loss records', () => {
+  const g1 = game('high', 10, [{ a: 6, b: 4 }, { a: 5, b: 1 }], ['a', 'b']);
+  g1.status = 'finished';
+  g1.winnerId = 'a';
+  const g2 = game('high', 10, [{ a: 2, b: 2 }], ['a', 'b']);
+  g2.status = 'finished';
+  const g3 = game('high', 10, [{ a: 1, b: 7 }], ['a', 'b']);
+  const s = L.playerStats({ players: [{ id: 'a' }, { id: 'b' }], games: [g1, g2, g3] });
+  assert.equal(s.a.points, 14);
+  assert.equal(s.b.points, 14);
+  assert.deepEqual([s.a.wins, s.a.draws, s.a.losses], [1, 1, 0]);
+  assert.deepEqual([s.b.wins, s.b.draws, s.b.losses], [0, 1, 1]);
+  assert.equal(s.a.unbeaten, 2);
 });

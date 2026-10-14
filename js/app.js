@@ -73,6 +73,10 @@
   const inGame = (g) => !!(me && g && g.playerIds.includes(me));
   const canEditGame = (g) => role === 'local' || (ready() && (isOwnerView || inGame(g)));
   const canManage = ready;
+  const fmtAvg = (v) => (Math.round(v * 10) / 10).toString();
+  const scoreline = (g) => L.standings(g).map((r) => r.total).join('–');
+  /** The game's closing line; games that ended level read as a draw even if saved as a win before draws existed. */
+  const endLineOf = (g) => (g.endLine && L.isDraw(g) && !g.draw ? `It’s a draw at ${scoreline(g)}. Nobody wins, nobody loses.` : g.endLine);
   const isEditing = (g) => !!(g && draft && draft.gameId === g.id && draft.editingId);
 
   function ago(ts) {
@@ -390,7 +394,7 @@
           <span class="eyebrow">${finished ? 'Final scores' : `Round ${g.rounds.length + 1}`}</span>
           <h1>${esc(g.name)}</h1>
           <div class="game-meta">
-            ${finished ? `<span class="pill pill-done">🏆 ${esc(P[g.winnerId] ? P[g.winnerId].name : '')} won</span>` : '<span class="pill pill-live">Live</span>'}
+            ${finished ? (L.isDraw(g) ? `<span class="pill pill-done">🤝 Draw · ${esc(scoreline(g))}</span>` : `<span class="pill pill-done">🏆 ${esc(P[L.winnerOf(g)] ? P[L.winnerOf(g)].name : '')} won</span>`) : '<span class="pill pill-live">Live</span>'}
             <span class="pill">${esc(ruleText(g))}</span>
             ${!canEditGame(g) && !finished ? `<span class="pill">${ready() ? '👀 You’re not in this game, so you’re watching' : '👀 Updates by itself'}</span>` : ''}
           </div>
@@ -401,6 +405,7 @@
               ? `<button type="button" class="btn btn-ghost" data-action="new-game">New game</button>`
               : `<button type="button" class="btn btn-ghost btn-small" data-action="game-settings">⚙ Settings</button>
                  <button type="button" class="btn btn-ghost btn-small" data-action="add-to-game">+ Player</button>
+                 <button type="button" class="btn btn-ghost btn-small" data-action="quit-game">Quit game</button>
                  <button type="button" class="btn btn-ink btn-small" data-action="finish-game" ${g.rounds.length ? '' : 'disabled'}>Finish game</button>`
           }
         </div>
@@ -473,9 +478,10 @@
         if (editIdx >= 0) round.comments.unshift(`Round ${idx + 1} was re-scored. The judges have spoken.`);
         const over = L.checkOver(game);
         if (over.over) {
-          const same = wasFinished && game.winnerId === over.winnerId;
+          const same = wasFinished && game.winnerId === over.winnerId && !!game.draw === over.draw;
           game.status = 'finished';
           game.winnerId = over.winnerId;
+          game.draw = over.draw;
           if (!same) {
             game.finishedAt = Date.now();
             game.endLine = L.gameOverLine(game, names());
@@ -484,6 +490,7 @@
         } else if (wasFinished && game.target) {
           game.status = 'active';
           game.winnerId = null;
+          game.draw = false;
           game.finishedAt = null;
           game.endLine = null;
         }
@@ -554,7 +561,7 @@
     const items = [];
     const notesAfter = {};
     (g.aiNotes || []).forEach((n) => (notesAfter[n.after] = notesAfter[n.after] || []).push(n));
-    if (g.endLine) items.push(`<div class="feed-item"><span class="feed-badge is-end">🏁</span><div class="feed-body"><p class="feed-line"><strong>${esc(g.endLine)}</strong></p></div></div>`);
+    if (g.endLine) items.push(`<div class="feed-item"><span class="feed-badge is-end">${L.isDraw(g) ? '🤝' : '🏁'}</span><div class="feed-body"><p class="feed-line"><strong>${esc(endLineOf(g))}</strong></p></div></div>`);
     for (let i = g.rounds.length; i >= 0; i--) {
       (notesAfter[i] || [])
         .slice()
@@ -613,11 +620,13 @@
   }
 
   function renderFinishedPanel(g) {
-    const w = byId()[g.winnerId];
+    const draw = L.isDraw(g);
+    const w = byId()[L.winnerOf(g)];
     return `<div class="trophy" style="padding:10px 0">
-      <span class="trophy-cup">🏆</span>
-      <span class="eyebrow">Champion</span>
-      <h2>${esc(w ? `${w.emoji} ${w.name}` : 'Someone')}</h2>
+      <span class="trophy-cup">${draw ? '🤝' : '🏆'}</span>
+      <span class="eyebrow">${draw ? `Draw · ${esc(scoreline(g))}` : 'Champion'}</span>
+      <h2>${draw ? 'Honours even' : esc(w ? `${w.emoji} ${w.name}` : 'Someone')}</h2>
+      ${draw ? '<p class="muted">Nobody wins, nobody loses. It goes down as a draw for everyone.</p>' : ''}
       ${podium(g)}
       <div class="btn-row" style="justify-content:center;margin-top:8px" ${canManage() ? '' : 'hidden'}>
         ${canEditGame(g) ? `<button type="button" class="btn btn-green" data-action="play-again" data-game="${esc(g.id)}">Play again, same players</button>` : ''}
@@ -626,12 +635,14 @@
     </div>`;
   }
 
-  function finishGame(g, winnerId) {
+  function finishGame(g) {
     let done;
     commit((s) => {
       const game = s.games.find((x) => x.id === g.id);
+      const draw = L.tiedAtTop(game);
       game.status = 'finished';
-      game.winnerId = winnerId;
+      game.draw = draw;
+      game.winnerId = draw ? null : L.standings(game)[0].id;
       game.finishedAt = Date.now();
       game.endLine = L.gameOverLine(game, names());
       done = game;
@@ -644,13 +655,14 @@
     FX.confetti({ count: 220 });
     setTimeout(() => FX.confetti({ x: innerWidth * 0.2, y: innerHeight * 0.5, count: 90 }), 300);
     setTimeout(() => FX.confetti({ x: innerWidth * 0.8, y: innerHeight * 0.5, count: 90 }), 550);
-    const w = byId()[g.winnerId];
+    const draw = L.isDraw(g);
+    const w = byId()[L.winnerOf(g)];
     openModal(
       `<div class="trophy">
-        <span class="trophy-cup">🏆</span>
+        <span class="trophy-cup">${draw ? '🤝' : '🏆'}</span>
         <span class="eyebrow">Game over · ${plural(g.rounds.length, 'round')}</span>
-        <h1>${esc(w ? `${w.name} wins!` : 'We have a winner!')}</h1>
-        <p class="muted">${esc(g.endLine || '')}</p>
+        <h1>${draw ? `It’s a draw! ${esc(scoreline(g))}` : esc(w ? `${w.name} wins!` : 'We have a winner!')}</h1>
+        <p class="muted">${esc(endLineOf(g) || '')}</p>
         ${podium(g)}
       </div>
       <div class="btn-row" style="justify-content:center">
@@ -725,7 +737,7 @@
     let leadChanges = 0;
     for (let i = 2; i <= g.rounds.length; i++) if (L.standingsAfter(g, i)[0].id !== L.standingsAfter(g, i - 1)[0].id) leadChanges++;
     const tiles = [
-      ['var(--red)', g.status === 'finished' ? 'Winner' : 'Leader', nm(st[0].id), plural(st[0].total, 'point')],
+      L.isDraw(g) ? ['var(--red)', 'Result', 'Draw', scoreline(g)] : ['var(--red)', g.status === 'finished' ? 'Winner' : 'Leader', nm(L.winnerOf(g) || st[0].id), plural(st[0].total, 'point')],
       ['var(--blue)', 'Rounds', g.rounds.length, plural(leadChanges, 'lead change')],
       ['var(--yellow)', L.higherWins(g) ? 'Biggest round' : 'Worst hit', big.v, `${nm(big.id)} in R${big.n}`],
       ['var(--green)', 'Most rounds won', mostWins.roundsWon, nm(mostWins.id)],
@@ -766,11 +778,20 @@
     const totalRounds = state.games.reduce((sum, g) => sum + g.rounds.length, 0);
     const totalPts = state.games.reduce((sum, g) => sum + g.rounds.reduce((a, r) => a + Object.values(r.points || {}).reduce((x, y) => x + y, 0), 0), 0);
     if (!compareIds || !compareIds.every((id) => stats.some((s) => s.id === id))) compareIds = [...stats].sort((a, b) => b.rounds - a.rounds).slice(0, 4).map((s) => s.id);
+    const nameCell = (s, i) => `<td><span class="who"><b class="rank-num">${i + 1}</b>${avatar(P[s.id])}<span>${esc(P[s.id] ? P[s.id].name : '?')}</span></span></td>`;
     const board = [...stats]
-      .sort((a, b) => b.wins - a.wins || b.winRate - a.winRate || b.roundsWon - a.roundsWon)
+      .sort((a, b) => b.wins - a.wins || b.draws - a.draws || a.losses - b.losses || b.points - a.points)
       .map(
         (s, i) =>
-          `<tr><td><span class="who"><b class="rank-num">${i + 1}</b>${avatar(P[s.id])}<span>${esc(P[s.id] ? P[s.id].name : '?')}</span></span></td><td><strong>${s.wins}</strong> / ${s.finished}</td><td>${Math.round(s.winRate * 100)}%</td><td>${s.roundsWon}</td><td>${Math.round(s.roundWinRate * 100)}%</td><td>${s.bestRound || '—'}</td><td>${s.longestStreak}</td><td>${held[s.id] || 0} 🏆</td></tr>`
+          `<tr>${nameCell(s, i)}<td><strong>${s.wins}</strong></td><td>${s.draws}</td><td>${s.losses}</td><td>${s.finished}</td><td>${Math.round(s.winRate * 100)}%</td><td>${s.roundsWon}</td><td>${s.longestStreak}</td><td>${held[s.id] || 0} 🏆</td></tr>`
+      )
+      .join('');
+    const topPts = Math.max(1, ...stats.map((s) => s.points));
+    const pointsBoard = [...stats]
+      .sort((a, b) => b.points - a.points || b.wins - a.wins)
+      .map(
+        (s, i) =>
+          `<tr>${nameCell(s, i)}<td class="pts-cell"><span class="pts-bar pc-${esc(P[s.id] ? P[s.id].color : 'ink')}"><i style="width:${Math.round((s.points / topPts) * 100)}%"></i></span><strong>${s.points}</strong></td><td>${s.games}</td><td>${fmtAvg(s.avgPerGame)}</td><td>${s.rounds ? fmtAvg(s.points / s.rounds) : '—'}</td><td>${s.bestGame || '—'}</td><td>${s.bestRound || '—'}</td></tr>`
       )
       .join('');
     const h2h = L.headToHead(state);
@@ -800,8 +821,10 @@
         <div class="tile" style="--tc:var(--green)"><span class="eyebrow">Points scored</span><span class="tile-value">${totalPts.toLocaleString()}</span><span class="tile-sub">across all games</span></div>
         <div class="tile" style="--tc:var(--blue)"><span class="eyebrow">Players</span><span class="tile-value">${stats.length}</span><span class="tile-sub">have played</span></div>
       </section>
-      <section class="panel"><div class="panel-head"><h2><span class="pip pip-green"></span>Leaderboard</h2><span class="entry-hint">Ranked by games won</span></div>
-        <div class="table-wrap"><table><thead><tr><th>Player</th><th>Won / finished</th><th>Win %</th><th>Rounds won</th><th>Round win %</th><th>Best round</th><th>Best streak</th><th>Trophies</th></tr></thead><tbody>${board}</tbody></table></div></section>
+      <section class="panel"><div class="panel-head"><h2><span class="pip pip-yellow"></span>Points table</h2><span class="entry-hint">Every point from every game, added up</span></div>
+        <div class="table-wrap"><table><thead><tr><th>Player</th><th>Points</th><th>Games</th><th>Per game</th><th>Per round</th><th>Best game</th><th>Best round</th></tr></thead><tbody>${pointsBoard}</tbody></table></div></section>
+      <section class="panel"><div class="panel-head"><h2><span class="pip pip-green"></span>Leaderboard</h2><span class="entry-hint">Ranked by wins. Draws count for nobody.</span></div>
+        <div class="table-wrap"><table><thead><tr><th>Player</th><th title="Wins">W</th><th title="Draws">D</th><th title="Losses">L</th><th>Finished</th><th>Win %</th><th>Rounds won</th><th>Best streak</th><th>Trophies</th></tr></thead><tbody>${board}</tbody></table></div></section>
       <div class="chart-grid">
         <section class="panel"><div class="panel-head"><h2><span class="pip pip-red"></span>Wins</h2><span class="entry-hint">Finished games</span></div><div class="chart-box tall"><canvas id="ch-wins" role="img" aria-label="Games won per player"></canvas></div></section>
         <section class="panel"><div class="panel-head"><h2><span class="pip pip-wild"></span>Player DNA</h2><span class="entry-hint">Compare up to 4</span></div>
@@ -904,6 +927,7 @@
               if (over.over) {
                 game.status = 'finished';
                 game.winnerId = over.winnerId;
+                game.draw = over.draw;
                 game.finishedAt = Date.now();
                 game.endLine = L.gameOverLine(game, names());
                 done = game;
@@ -923,12 +947,12 @@
     return `<article class="game-card">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start">
         <div style="min-width:0"><h3>${esc(g.name)}</h3><span class="muted" style="font-size:.82rem;font-weight:700">${esc(new Date(g.createdAt).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }))} · ${plural(g.rounds.length, 'round')}</span></div>
-        ${g.status === 'finished' ? '<span class="pill pill-done">Finished</span>' : '<span class="pill pill-live">Live</span>'}
+        ${g.status === 'finished' ? (L.isDraw(g) ? '<span class="pill pill-done">🤝 Draw</span>' : '<span class="pill pill-done">Finished</span>') : '<span class="pill pill-live">Live</span>'}
       </div>
       <div class="mini-stand">${st
         .map(
           (row) =>
-            `<div class="mini-row"><b>${row.rank}</b><span class="who">${avatar(P[row.id])}<span>${esc(P[row.id] ? P[row.id].name : '?')}${g.winnerId === row.id ? ' 🏆' : ''}</span></span><span class="num">${row.total}</span><div class="mini-bar pc-${esc(P[row.id] ? P[row.id].color : 'ink')}"><i style="width:${(Math.abs(row.total) / max) * 100}%"></i></div></div>`
+            `<div class="mini-row"><b>${row.rank}</b><span class="who">${avatar(P[row.id])}<span>${esc(P[row.id] ? P[row.id].name : '?')}${L.winnerOf(g) === row.id ? ' 🏆' : ''}</span></span><span class="num">${row.total}</span><div class="mini-bar pc-${esc(P[row.id] ? P[row.id].color : 'ink')}"><i style="width:${(Math.abs(row.total) / max) * 100}%"></i></div></div>`
         )
         .join('')}</div>
       <div class="btn-row" ${canManage() ? '' : 'hidden'}>
@@ -970,7 +994,7 @@
         return `<article class="roster-card">
           <div class="roster-top">${avatar(p, 'avatar-lg')}<div style="min-width:0;flex:1"><h3>${esc(p.name)} ${playerTag(p)}</h3><span class="muted" style="font-size:.8rem;font-weight:700">${s.lastPlayed ? `Last played ${esc(ago(s.lastPlayed))}` : 'Yet to play'}</span></div>
             ${canEditPlayer(p) ? `<button type="button" class="btn btn-ghost btn-small" data-action="edit-player" data-pid="${esc(p.id)}">Edit</button>` : ''}</div>
-          <div class="roster-stats"><div><strong>${s.wins}</strong><small>Wins</small></div><div><strong>${s.games}</strong><small>Games</small></div><div><strong>${s.roundsWon}</strong><small>Rounds won</small></div></div>
+          <div class="roster-stats"><div><strong>${s.points}</strong><small>Points</small></div><div><strong>${s.wins}</strong><small>Wins</small></div><div><strong>${s.draws}</strong><small>Draws</small></div><div><strong>${s.losses}</strong><small>Losses</small></div></div>
         </article>`;
       })
       .join('');
@@ -1144,6 +1168,7 @@
       if (game.status === 'finished' && game.target && !L.checkOver(game).over) {
         game.status = 'active';
         game.winnerId = null;
+        game.draw = false;
         game.finishedAt = null;
         game.endLine = null;
       }
@@ -1471,10 +1496,31 @@
       const p = byId()[top.id];
       confirmModal({
         title: 'Finish the game?',
-        body: `${esc(p ? p.name : 'The leader')} wins with ${top.total} points.`,
+        body: L.tiedAtTop(g)
+          ? `It’s level at ${esc(scoreline(g))}, so it goes down as a draw. Nobody wins and nobody loses.`
+          : `${esc(p ? p.name : 'The leader')} wins with ${plural(top.total, 'point')}.`,
         ok: 'Finish game',
         okClass: 'btn-green',
-        onOk: () => finishGame(g, top.id),
+        onOk: () => finishGame(g),
+      });
+    },
+    'quit-game': () => {
+      if (!guardGame()) return;
+      const g = currentGame();
+      if (!g || g.status === 'finished') return;
+      confirmModal({
+        title: 'Quit this game?',
+        body: `“${esc(g.name)}” and its ${plural(g.rounds.length, 'round')} will be thrown away. Nothing from it counts towards wins, points, stats or trophies.`,
+        ok: 'Quit and discard',
+        onOk: () => {
+          draft = null;
+          setup = null;
+          commit((st) => {
+            st.games = st.games.filter((x) => x.id !== g.id);
+            if (st.activeGameId === g.id) st.activeGameId = null;
+          });
+          toast('Game discarded. It never happened.');
+        },
       });
     },
     'add-to-game': () => guardGame() && openAddToGame(),
