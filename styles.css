@@ -753,7 +753,7 @@ tfoot td { font: 400 1.1rem/1 var(--f-display); background: var(--surface-2); bo
 /* ------------------------------------------------- tables lobby and pause */
 .tab-count { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--red); color: #fff; font-size: 0.72rem; line-height: 20px; text-align: center; }
 .pill-paused { background: color-mix(in srgb, var(--yellow) 18%, var(--surface)); border-color: color-mix(in srgb, var(--yellow) 50%, transparent); color: var(--fg); }
-.back-link { display: inline-block; margin-bottom: 10px; font-size: 0.92rem; }
+.back-link { display: inline-block; justify-self: start; margin-bottom: 10px; font-size: 0.92rem; }
 .tables { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 16px; }
 .table-card { background: var(--surface); border: 1px solid var(--line); border-left: 6px solid var(--red); border-radius: var(--r-lg); padding: 16px; display: grid; gap: 12px; box-shadow: var(--shadow); min-width: 0; }
 .table-card.is-paused { border-left-color: var(--yellow); background: color-mix(in srgb, var(--yellow) 5%, var(--surface)); }
@@ -770,6 +770,46 @@ tfoot td { font: 400 1.1rem/1 var(--f-display); background: var(--surface-2); bo
 .table-player b { font: 400 1.3rem/1 var(--f-display); }
 .table-vs { font: 400 0.85rem/1 var(--f-display); color: var(--muted); }
 .busy-list { margin: 0 0 12px; padding-left: 1.2em; display: grid; gap: 6px; }
+
+/* ------------------------------------------------------ months and history */
+.c-purple { --c: #7b3fd0; }
+.h-note { font: 700 0.78rem/1 var(--f-body); letter-spacing: 0.06em; text-transform: uppercase; margin-left: 6px; }
+.months { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 16px; }
+.month-card { text-align: left; color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-top: 6px solid #7b3fd0; border-radius: var(--r-lg); padding: 16px; display: grid; gap: 10px; box-shadow: var(--shadow); min-width: 0; font: inherit; transition: transform 0.15s; }
+button.month-card:hover { transform: translateY(-2px); }
+.month-card.is-live { border-top-color: var(--red); }
+.month-card.is-empty { opacity: 0.75; }
+.month-card h3 { font-size: 1.5rem; }
+.month-champ { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.month-champ small { display: block; font-size: 0.72rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.month-champ b { font-size: 1.1rem; }
+.month-meta { font-size: 0.85rem; font-weight: 700; color: var(--muted); }
+
+.potm { position: relative; display: flex; align-items: center; gap: 18px; padding: 22px 24px; border-radius: var(--r-lg); background: linear-gradient(135deg, color-mix(in srgb, var(--pc, var(--yellow)) 22%, var(--surface)), var(--surface) 70%); border: 2px solid color-mix(in srgb, var(--pc, var(--yellow)) 55%, transparent); box-shadow: var(--shadow); overflow: hidden; }
+.potm .avatar { width: 84px; height: 84px; font-size: 2.6rem; flex: none; }
+.potm-crown { position: absolute; right: 18px; top: 8px; font-size: 3.4rem; opacity: 0.9; transform: rotate(12deg); }
+.potm.is-empty .potm-crown { position: static; transform: none; opacity: 0.5; }
+.potm-body { display: grid; gap: 4px; min-width: 0; padding-right: 56px; }
+.potm h2 { font-size: clamp(1.8rem, 6vw, 2.6rem); overflow-wrap: anywhere; }
+.potm-line { font-weight: 700; }
+@media (max-width: 520px) { .potm { flex-direction: column; text-align: center; } .potm-body { padding-right: 0; } .potm-crown { font-size: 2.4rem; } }
+
+.potm-strip { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; font: inherit; color: var(--fg); padding: 10px 14px; margin-bottom: 14px; border-radius: 999px; background: color-mix(in srgb, var(--pc) 12%, var(--surface)); border: 1px solid color-mix(in srgb, var(--pc) 40%, transparent); }
+.potm-strip .avatar { width: 30px; height: 30px; font-size: 0.95rem; box-shadow: none; }
+.potm-strip-crown { font-size: 1.2rem; }
+.potm-strip-text { flex: 1; min-width: 0; }
+.potm-strip-go { font-weight: 800; white-space: nowrap; }
+@media (max-width: 520px) { .potm-strip { border-radius: 18px; flex-wrap: wrap; } .potm-strip-go { width: 100%; padding-left: 40px; } }
+
+.trophy-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
+.trophy-row { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 4px 10px; align-items: center; padding: 8px 12px; border-radius: 14px; background: var(--surface-2); border-left: 4px solid var(--pc); }
+.trophy-row-icon { font-size: 1.5rem; grid-row: span 2; text-align: center; }
+.trophy-row-body { display: flex; flex-wrap: wrap; gap: 0 8px; align-items: baseline; min-width: 0; }
+.trophy-row-body .muted { font-size: 0.82rem; font-weight: 700; }
+.trophy-row-who { display: flex; align-items: center; gap: 4px; min-width: 0; font-weight: 700; font-size: 0.9rem; }
+.trophy-row-who .avatar { width: 24px; height: 24px; font-size: 0.8rem; box-shadow: none; }
+.trophy-row-who > span:last-child { margin-left: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 400px) { .trophy-list { grid-template-columns: 1fr; } }
 
 /* player color variants */
 .pc-red { --pc: var(--red); --pd: var(--red-deep); --pi: #fff; }

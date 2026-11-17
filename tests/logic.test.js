@@ -146,3 +146,32 @@ test('cumulative points and win / draw / loss records', () => {
   assert.deepEqual([s.b.wins, s.b.draws, s.b.losses], [0, 1, 1]);
   assert.equal(s.a.unbeaten, 2);
 });
+
+test('months: a game counts in the month it finished; unfinished games count now', () => {
+  const at = (y, m, d) => new Date(y, m - 1, d, 12).getTime();
+  const now = at(2026, 11, 17);
+  const g = (id, status, created, finished, rows = [{ a: 3, b: 1 }]) => {
+    const x = game('high', 10, rows, ['a', 'b']);
+    Object.assign(x, { id, status, createdAt: created, finishedAt: finished, winnerId: status === 'finished' ? 'a' : null });
+    x.rounds.forEach((r) => (r.at = created));
+    return x;
+  };
+  const games = [
+    g('oct', 'finished', at(2026, 10, 3), at(2026, 10, 3)),
+    g('across', 'finished', at(2026, 10, 30), at(2026, 11, 2)),
+    g('paused', 'paused', at(2026, 10, 29), null),
+    g('nov', 'finished', at(2026, 11, 5), at(2026, 11, 5), [{ a: 1, b: 4 }]),
+  ];
+  games[3].winnerId = 'b';
+  const state = { players: [{ id: 'a' }, { id: 'b' }], games };
+  assert.deepEqual(games.map((x) => L.gameMonth(x, now)), ['2026-10', '2026-11', '2026-11', '2026-11']);
+  assert.deepEqual(L.monthsOf(state, now), ['2026-11', '2026-10']);
+  assert.deepEqual(L.monthState(state, '2026-10', now).games.map((x) => x.id), ['oct']);
+  assert.equal(state.games.length, 4, 'nothing is removed');
+  const nov = L.playerStats(L.monthState(state, '2026-11', now));
+  assert.deepEqual([nov.a.wins, nov.b.wins], [1, 1]);
+  assert.equal(L.prevMonth('2026-01'), '2025-12');
+  const pom = L.playerOfMonth(L.monthState(state, '2026-10', now));
+  assert.equal(pom.id, 'a');
+  assert.equal(L.playerOfMonth({ players: [{ id: 'a' }], games: [] }), null);
+});

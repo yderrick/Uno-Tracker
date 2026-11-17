@@ -47,6 +47,7 @@
   let setup = null; // { sel: Set, mode, target, name, open }
   let statsGameId = null;
   let compareIds = null;
+  let historyMonth = null; // the month open in History (YYYY-MM), or null for the list
   const TARGETS = [10, 15, 20, 25, 30, null];
   let justScored = null;
   let dealtFor = null;
@@ -159,6 +160,7 @@
       focus,
       statsGameId,
       compareIds,
+      historyMonth,
       replay: pendingReplay,
       replayTries,
       setup: setup && { ...setup, sel: [...setup.sel] },
@@ -291,9 +293,9 @@
     $$('.tab').forEach((t) => (t.dataset.view === view ? t.setAttribute('aria-current', 'page') : t.removeAttribute('aria-current')));
     $('#demo-banner').hidden = !(state.isDemo && isAdmin());
     renderSync();
-    const views = { play: renderPlay, stats: renderStats, points: renderPoints, trophies: renderTrophies, players: renderPlayers };
+    const views = { play: renderPlay, stats: renderStats, points: renderPoints, trophies: renderTrophies, history: renderHistory, players: renderPlayers };
     $('#view').innerHTML = (views[view] || renderPlay)();
-    const after = { play: afterPlay, stats: afterStats, points: afterPoints, players: afterPlayers }[view];
+    const after = { play: afterPlay, stats: afterStats, points: afterPoints, history: afterHistory, players: afterPlayers }[view];
     const live = state.games.filter((g) => g.status === 'active').length;
     const badge = $('#live-count');
     if (badge) {
@@ -369,7 +371,14 @@
     const paused = state.games.filter((g) => g.status === 'paused').sort(byRecent);
     const recent = state.games.filter((g) => g.status === 'finished').sort((a, b) => (b.finishedAt || b.createdAt) - (a.finishedAt || a.createdAt)).slice(0, 3);
     const watching = !canManage();
-    return `
+    const prev = L.prevMonth(thisMonth());
+    const prevSt = monthOf(prev);
+    const prevPom = prevSt.games.length && L.playerOfMonth(prevSt);
+    const champ = prevPom && P[prevPom.id];
+    const strip = champ
+      ? `<button type="button" class="potm-strip pc-${esc(champ.color)}" data-action="open-month" data-month="${prev}"><span class="potm-strip-crown" aria-hidden="true">👑</span>${avatar(champ)}<span class="potm-strip-text">${esc(monthShort(prev))}’s Player of the Month: <b>${esc(champ.name)}</b></span><span class="potm-strip-go">See ${esc(monthShort(prev))} →</span></button>`
+      : '';
+    return `${strip}
       <section class="game-head"><div class="game-title"><span class="eyebrow">${role === 'checking' ? 'Loading' : live.length ? `${plural(live.length, 'game')} live` : 'Game night'}</span><h1>Tables</h1>
         <p class="muted">${watching ? 'Every game being played right now. Tap one to follow it live.' : 'Run as many games at once as you like. Pause one when someone steps out, and pick it back up later.'}</p></div>
         ${canManage() ? '<button type="button" class="btn btn-red btn-big" data-action="new-game">+ New game</button>' : ''}</section>
@@ -823,16 +832,20 @@
 
   /* -------------------------------------------------------------------- STATS */
   function renderStats() {
-    const games = [...state.games].sort((a, b) => b.createdAt - a.createdAt);
+    const st = cur();
+    const games = [...st.games].sort((a, b) => b.createdAt - a.createdAt);
     const withRounds = games.filter((g) => g.rounds.length);
-    if (!withRounds.length) return emptyState('📊', 'No scores yet', 'Play a round and the dashboards and charts show up here.', canManage() ? 'go-play' : null, 'Start a game');
-    if (!statsGameId || !withRounds.find((g) => g.id === statsGameId)) statsGameId = (currentGame() && currentGame().rounds.length ? currentGame() : withRounds[0]).id;
+    if (!withRounds.length)
+      return `<section class="game-head"><div class="game-title"><span class="eyebrow">${esc(monthName(thisMonth()))}</span><h1>Stats</h1><p class="muted">Every round, every game, every grudge. This month only.</p></div>
+        <button type="button" class="btn btn-ghost" data-action="go" data-view="history">📅 Past months</button></section>${freshMonth('Stats and dashboards')}`;
+    const here = currentGame();
+    if (!statsGameId || !withRounds.find((g) => g.id === statsGameId)) statsGameId = (here && withRounds.includes(here) ? here : withRounds[0]).id;
     return `
-      <section class="game-head"><div class="game-title"><span class="eyebrow">Dashboards</span><h1>Stats</h1><p class="muted">Every round, every game, every grudge.</p></div>
-        <button type="button" class="btn btn-yellow" data-action="go" data-view="trophies">🏆 Trophy Room</button></section>
+      <section class="game-head"><div class="game-title"><span class="eyebrow">${esc(monthName(thisMonth()))}</span><h1>Stats</h1><p class="muted">Every round, every game, every grudge. This month only: older months live in History.</p></div>
+        <div class="btn-row"><button type="button" class="btn btn-ghost" data-action="go" data-view="history">📅 Past months</button><button type="button" class="btn btn-yellow" data-action="go" data-view="trophies">🏆 Trophy Room</button></div></section>
       ${renderGameDashboard(findGame(statsGameId), withRounds)}
-      ${renderAllTime()}
-      <section class="panel"><div class="panel-head"><h2><span class="pip pip-blue"></span>Past games</h2></div>
+      ${renderAllTime(st)}
+      <section class="panel"><div class="panel-head"><h2><span class="pip pip-blue"></span>This month’s games</h2><button type="button" class="link-btn" data-action="go" data-view="history">Older months</button></div>
         <div class="games">${games.map((g) => gameCard(g, byId())).join('')}</div></section>`;
   }
 
@@ -881,53 +894,98 @@
       </div>`;
   }
 
-  function renderAllTime() {
+  /* ------------------------------------------------------------------- MONTHS
+     Every table, stat and trophy covers one month and starts again from zero on the 1st.
+     Nothing is deleted: a past month is the games that finished in it (see L.gameMonth). */
+  const thisMonth = () => L.monthKey(Date.now());
+  const monthOf = (key) => L.monthState(state, key);
+  const cur = () => monthOf(thisMonth());
+  const monthName = (key) => L.monthLabel(key);
+  const monthShort = (key) => L.monthLabel(key, { month: 'long' });
+  const statList = (st) => Object.values(L.playerStats(st)).filter((s) => s.rounds > 0);
+  const pointsIn = (st) => st.games.reduce((sum, g) => sum + g.rounds.reduce((a, r) => a + Object.values(r.points || {}).reduce((x, y) => x + y, 0), 0), 0);
+  const byWins = (a, b) => b.wins - a.wins || b.draws - a.draws || a.losses - b.losses || b.points - a.points;
+  const nameCell = (P, s, rank) => `<td><span class="who"><b class="rank-num">${rank}</b>${avatar(P[s.id])}<span>${esc(P[s.id] ? P[s.id].name : '?')}</span></span></td>`;
+
+  function monthTiles(st, stats) {
+    const finished = st.games.filter((g) => g.status === 'finished').length;
+    const rounds = st.games.reduce((sum, g) => sum + g.rounds.length, 0);
+    return `<section class="tiles">
+        <div class="tile" style="--tc:var(--red)"><span class="eyebrow">Games</span><span class="tile-value">${st.games.length}</span><span class="tile-sub">${finished} finished</span></div>
+        <div class="tile" style="--tc:var(--yellow)"><span class="eyebrow">Rounds dealt</span><span class="tile-value">${rounds}</span><span class="tile-sub">and not one of them fair</span></div>
+        <div class="tile" style="--tc:var(--green)"><span class="eyebrow">Points scored</span><span class="tile-value">${pointsIn(st).toLocaleString()}</span><span class="tile-sub">across ${plural(st.games.length, 'game')}</span></div>
+        <div class="tile" style="--tc:var(--blue)"><span class="eyebrow">Players</span><span class="tile-value">${stats.length}</span><span class="tile-sub">have played</span></div>
+      </section>`;
+  }
+
+  function leaderboardTable(st, stats) {
     const P = byId();
-    const stats = Object.values(L.playerStats(state)).filter((s) => s.rounds > 0);
-    const held = trophyCounts();
-    const finished = state.games.filter((g) => g.status === 'finished').length;
-    const totalRounds = state.games.reduce((sum, g) => sum + g.rounds.length, 0);
-    const totalPts = state.games.reduce((sum, g) => sum + g.rounds.reduce((a, r) => a + Object.values(r.points || {}).reduce((x, y) => x + y, 0), 0), 0);
-    if (!compareIds || !compareIds.every((id) => stats.some((s) => s.id === id))) compareIds = [...stats].sort((a, b) => b.rounds - a.rounds).slice(0, 4).map((s) => s.id);
-    const nameCell = (s, i) => `<td><span class="who"><b class="rank-num">${i + 1}</b>${avatar(P[s.id])}<span>${esc(P[s.id] ? P[s.id].name : '?')}</span></span></td>`;
-    const board = [...stats]
-      .sort((a, b) => b.wins - a.wins || b.draws - a.draws || a.losses - b.losses || b.points - a.points)
+    const held = trophyCounts(st);
+    const rows = [...stats]
+      .sort(byWins)
       .map(
         (s, i) =>
-          `<tr>${nameCell(s, i)}<td><strong>${s.wins}</strong></td><td>${s.draws}</td><td>${s.losses}</td><td>${s.finished}</td><td>${Math.round(s.winRate * 100)}%</td><td>${s.roundsWon}</td><td>${s.longestStreak}</td><td>${held[s.id] || 0} 🏆</td></tr>`
+          `<tr>${nameCell(P, s, i + 1)}<td><strong>${s.wins}</strong></td><td>${s.draws}</td><td>${s.losses}</td><td>${s.finished}</td><td>${Math.round(s.winRate * 100)}%</td><td>${s.roundsWon}</td><td>${s.longestStreak}</td><td>${held[s.id] || 0} 🏆</td></tr>`
       )
       .join('');
+    return `<div class="table-wrap"><table><thead><tr><th>Player</th><th title="Wins">W</th><th title="Draws">D</th><th title="Losses">L</th><th>Finished</th><th>Win %</th><th>Rounds won</th><th>Best streak</th><th>Trophies</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
 
-    const h2h = L.headToHead(state);
+  function pointsTable(stats) {
+    const P = byId();
+    const list = [...stats].sort((a, b) => b.points - a.points || b.wins - a.wins);
+    const topPts = Math.max(1, ...list.map((s) => s.points));
+    const rows = list
+      .map((s, i) => {
+        const gap = i ? list[0].points - s.points : 0;
+        return `<tr class="${i < 3 ? `pts-top pts-${i + 1}` : ''}">${nameCell(P, s, ['🥇', '🥈', '🥉'][i] || i + 1)}
+          <td><span class="pts-cell"><span class="pts-bar pc-${esc(P[s.id] ? P[s.id].color : 'ink')}"><i style="width:${Math.round((s.points / topPts) * 100)}%"></i></span><strong>${s.points}</strong></span></td>
+          <td class="muted">${i ? `−${gap}` : 'Leader'}</td><td>${s.wins}</td><td>${s.games}</td><td>${fmtAvg(s.avgPerGame)}</td><td>${s.rounds ? fmtAvg(s.points / s.rounds) : '—'}</td><td>${s.bestGame || '—'}</td><td>${s.bestRound || '—'}</td></tr>`;
+      })
+      .join('');
+    return `<div class="table-wrap"><table class="pts-table"><thead><tr><th>Player</th><th>Points</th><th>Gap</th><th>Wins</th><th>Games</th><th>Per game</th><th>Per round</th><th>Best game</th><th>Best round</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  function h2hTable(st, stats) {
+    const P = byId();
+    const h2h = L.headToHead(st);
     const hp = stats.map((s) => s.id);
-    const h2hTable =
-      finished && hp.length > 1
-        ? `<div class="table-wrap"><table class="h2h"><thead><tr><th>Row beat column</th>${hp.map((id) => `<th title="${esc(P[id] && P[id].name)}">${esc(P[id] ? P[id].emoji : '')} ${esc(P[id] ? P[id].name : '')}</th>`).join('')}</tr></thead><tbody>${hp
-            .map(
-              (a) =>
-                `<tr><td>${who(P[a])}</td>${hp
-                  .map((b) => {
-                    if (a === b) return '<td class="self"></td>';
-                    const w = h2h[a][b];
-                    const l = h2h[b][a];
-                    const tone = w > l ? 'var(--good)' : w < l ? 'var(--bad)' : 'var(--muted)';
-                    return `<td title="${esc(P[a] && P[a].name)} finished above ${esc(P[b] && P[b].name)} ${w} of ${w + l} times"><strong style="color:${tone}">${w}</strong><span class="muted">–${l}</span></td>`;
-                  })
-                  .join('')}</tr>`
-            )
-            .join('')}</tbody></table></div>`
-        : '<div class="empty"><p>Finish a game to see who has whose number.</p></div>';
+    if (!st.games.some((g) => g.status === 'finished') || hp.length < 2) return '<div class="empty"><p>Finish a game to see who has whose number.</p></div>';
+    return `<div class="table-wrap"><table class="h2h"><thead><tr><th>Row beat column</th>${hp.map((id) => `<th title="${esc(P[id] && P[id].name)}">${esc(P[id] ? P[id].emoji : '')} ${esc(P[id] ? P[id].name : '')}</th>`).join('')}</tr></thead><tbody>${hp
+      .map(
+        (a) =>
+          `<tr><td>${who(P[a])}</td>${hp
+            .map((b) => {
+              if (a === b) return '<td class="self"></td>';
+              const w = h2h[a][b];
+              const l = h2h[b][a];
+              const tone = w > l ? 'var(--good)' : w < l ? 'var(--bad)' : 'var(--muted)';
+              return `<td title="${esc(P[a] && P[a].name)} finished above ${esc(P[b] && P[b].name)} ${w} of ${w + l} times"><strong style="color:${tone}">${w}</strong><span class="muted">–${l}</span></td>`;
+            })
+            .join('')}</tr>`
+      )
+      .join('')}</tbody></table></div>`;
+  }
+
+  /** A fresh month with nothing played yet. */
+  function freshMonth(what) {
+    const prev = L.prevMonth(thisMonth());
+    const hasPrev = monthOf(prev).games.length;
+    return `<section class="panel"><div class="empty"><span class="empty-icon">🧼</span><h2>Fresh month, clean slate</h2>
+      <p>${esc(what)} for ${esc(monthName(thisMonth()))} start at zero. Play a round to get on the board.</p>
+      <div class="btn-row" style="justify-content:center">${canManage() ? '<button type="button" class="btn btn-red" data-action="go-play">Start a game</button>' : ''}
+      ${hasPrev ? `<button type="button" class="btn btn-ghost" data-action="open-month" data-month="${prev}">See ${esc(monthShort(prev))}’s results</button>` : ''}</div></div></section>`;
+  }
+
+  function renderAllTime(st) {
+    const P = byId();
+    const stats = statList(st);
+    if (!compareIds || !compareIds.every((id) => stats.some((s) => s.id === id))) compareIds = [...stats].sort((a, b) => b.rounds - a.rounds).slice(0, 4).map((s) => s.id);
     return `
-      <section class="panel dash-head"><div class="panel-head" style="margin:0"><h2><span class="pip pip-green"></span>All-time</h2><span class="entry-hint">Across every game on this page</span></div></section>
-      <section class="tiles">
-        <div class="tile" style="--tc:var(--red)"><span class="eyebrow">Games</span><span class="tile-value">${state.games.length}</span><span class="tile-sub">${finished} finished</span></div>
-        <div class="tile" style="--tc:var(--yellow)"><span class="eyebrow">Rounds dealt</span><span class="tile-value">${totalRounds}</span><span class="tile-sub">and not one of them fair</span></div>
-        <div class="tile" style="--tc:var(--green)"><span class="eyebrow">Points scored</span><span class="tile-value">${totalPts.toLocaleString()}</span><span class="tile-sub">across all games</span></div>
-        <div class="tile" style="--tc:var(--blue)"><span class="eyebrow">Players</span><span class="tile-value">${stats.length}</span><span class="tile-sub">have played</span></div>
-      </section>
+      <section class="panel dash-head"><div class="panel-head" style="margin:0"><h2><span class="pip pip-green"></span>${esc(monthName(thisMonth()))}</h2><span class="entry-hint">This month’s games. Everything resets on the 1st.</span></div></section>
+      ${monthTiles(st, stats)}
       <section class="panel points-teaser"><div class="panel-head" style="margin:0"><h2><span class="pip pip-yellow"></span>Points table</h2><button type="button" class="btn btn-yellow btn-small" data-action="go" data-view="points">See the points table →</button></div></section>
-      <section class="panel"><div class="panel-head"><h2><span class="pip pip-green"></span>Leaderboard</h2><span class="entry-hint">Ranked by wins. Draws count for nobody.</span></div>
-        <div class="table-wrap"><table><thead><tr><th>Player</th><th title="Wins">W</th><th title="Draws">D</th><th title="Losses">L</th><th>Finished</th><th>Win %</th><th>Rounds won</th><th>Best streak</th><th>Trophies</th></tr></thead><tbody>${board}</tbody></table></div></section>
+      <section class="panel"><div class="panel-head"><h2><span class="pip pip-green"></span>Leaderboard</h2><span class="entry-hint">Ranked by wins. Draws count for nobody.</span></div>${leaderboardTable(st, stats)}</section>
       <div class="chart-grid">
         <section class="panel"><div class="panel-head"><h2><span class="pip pip-red"></span>Wins</h2><span class="entry-hint">Finished games</span></div><div class="chart-box tall"><canvas id="ch-wins" role="img" aria-label="Games won per player"></canvas></div></section>
         <section class="panel"><div class="panel-head"><h2><span class="pip pip-wild"></span>Player DNA</h2><span class="entry-hint">Compare up to 4</span></div>
@@ -936,94 +994,91 @@
             .join('')}</div>
           <div class="chart-box"><canvas id="ch-radar" role="img" aria-label="Player comparison"></canvas></div></section>
       </div>
-      <section class="panel"><div class="panel-head"><h2><span class="pip pip-blue"></span>Head to head</h2><span class="entry-hint">How often each row player finished above each column player</span></div>${h2hTable}</section>`;
+      <section class="panel"><div class="panel-head"><h2><span class="pip pip-blue"></span>Head to head</h2><span class="entry-hint">How often each row player finished above each column player</span></div>${h2hTable(st, stats)}</section>`;
   }
 
   /* ------------------------------------------------------------------- POINTS */
   function renderPoints() {
     const P = byId();
-    const stats = Object.values(L.playerStats(state))
-      .filter((s) => s.rounds > 0)
-      .sort((a, b) => b.points - a.points || b.wins - a.wins);
-    if (!stats.length)
-      return `<section class="game-head"><div class="game-title"><span class="eyebrow">Points</span><h1>Points table</h1></div></section>
-        <div class="empty"><span class="empty-icon">🔢</span><p>Play a round and the points start piling up here.</p></div>`;
+    const st = cur();
+    const stats = statList(st).sort((a, b) => b.points - a.points || b.wins - a.wins);
+    const head = (eyebrow) => `<section class="game-head"><div class="game-title"><span class="eyebrow">${eyebrow}</span><h1>Points table</h1>
+        <p class="muted">Every point from this month’s games, added up and ranked. Live and paused games count as they go. The table starts again from zero on the 1st.</p></div>
+        <button type="button" class="btn btn-ghost" data-action="go" data-view="history">📅 Past months</button></section>`;
+    if (!stats.length) return head(esc(monthName(thisMonth()))) + freshMonth('Points');
     const totalPts = stats.reduce((a, s) => a + s.points, 0);
-    const topPts = Math.max(1, ...stats.map((s) => s.points));
-    const leader = stats[0];
-    const second = stats[1];
+    const [leader, second] = stats;
     const bestAvg = [...stats].filter((s) => s.games).sort((a, b) => b.avgPerGame - a.avgPerGame)[0];
     const bestGame = [...stats].sort((a, b) => (b.bestGame || 0) - (a.bestGame || 0))[0];
     const nm = (s) => esc(s && P[s.id] ? `${P[s.id].emoji} ${P[s.id].name}` : '?');
-    const rows = stats
-      .map((s, i) => {
-        const gap = i ? leader.points - s.points : 0;
-        return `<tr class="${i < 3 ? `pts-top pts-${i + 1}` : ''}"><td><span class="who"><b class="rank-num">${['🥇', '🥈', '🥉'][i] || i + 1}</b>${avatar(P[s.id])}<span>${esc(P[s.id] ? P[s.id].name : '?')}</span></span></td>
-          <td><span class="pts-cell"><span class="pts-bar pc-${esc(P[s.id] ? P[s.id].color : 'ink')}"><i style="width:${Math.round((s.points / topPts) * 100)}%"></i></span><strong>${s.points}</strong></span></td>
-          <td class="muted">${i ? `−${gap}` : 'Leader'}</td><td>${s.wins}</td><td>${s.games}</td><td>${fmtAvg(s.avgPerGame)}</td><td>${s.rounds ? fmtAvg(s.points / s.rounds) : '—'}</td><td>${s.bestGame || '—'}</td><td>${s.bestRound || '—'}</td></tr>`;
-      })
-      .join('');
     return `
-      <section class="game-head"><div class="game-title"><span class="eyebrow">${totalPts.toLocaleString()} points scored all-time</span><h1>Points table</h1>
-        <p class="muted">Every point from every game, added up and ranked. Live and paused games count as they go.</p></div></section>
+      ${head(`${esc(monthName(thisMonth()))} · ${totalPts.toLocaleString()} points so far`)}
       <section class="tiles">
         <div class="tile" style="--tc:var(--yellow)"><span class="eyebrow">Top of the table</span><span class="tile-value">${leader.points}</span><span class="tile-sub">${nm(leader)}${second ? ` · ${leader.points - second.points} ahead` : ''}</span></div>
         <div class="tile" style="--tc:var(--red)"><span class="eyebrow">Best per game</span><span class="tile-value">${bestAvg ? fmtAvg(bestAvg.avgPerGame) : '—'}</span><span class="tile-sub">${nm(bestAvg)}</span></div>
         <div class="tile" style="--tc:var(--green)"><span class="eyebrow">Biggest single game</span><span class="tile-value">${bestGame.bestGame || 0}</span><span class="tile-sub">${nm(bestGame)}</span></div>
         <div class="tile" style="--tc:var(--blue)"><span class="eyebrow">Points scored</span><span class="tile-value">${totalPts.toLocaleString()}</span><span class="tile-sub">by ${plural(stats.length, 'player')}</span></div>
       </section>
-      <section class="panel"><div class="panel-head"><h2><span class="pip pip-yellow"></span>Points table</h2><span class="entry-hint">Ranked by cumulative points</span></div>
-        <div class="table-wrap"><table class="pts-table"><thead><tr><th>Player</th><th>Points</th><th>Gap</th><th>Wins</th><th>Games</th><th>Per game</th><th>Per round</th><th>Best game</th><th>Best round</th></tr></thead><tbody>${rows}</tbody></table></div></section>
+      <section class="panel"><div class="panel-head"><h2><span class="pip pip-yellow"></span>Points table</h2><span class="entry-hint">Ranked by points this month</span></div>${pointsTable(stats)}</section>
       <div class="chart-grid">
         <section class="panel"><div class="panel-head"><h2><span class="pip pip-red"></span>The long race</h2><span class="entry-hint">Points piling up, game by game</span></div><div class="chart-box tall"><canvas id="ch-pts-time" role="img" aria-label="Cumulative points after each game"></canvas></div></section>
         <section class="panel"><div class="panel-head"><h2><span class="pip pip-green"></span>Slice of the pie</h2><span class="entry-hint">Share of every point scored</span></div><div class="chart-box tall"><canvas id="ch-pts-share" role="img" aria-label="Share of all points"></canvas></div></section>
       </div>`;
   }
 
+  function chartsOffline() {
+    if (C.available()) return false;
+    $$('.chart-box').forEach((b) => (b.innerHTML = '<div class="chart-fallback">Charts need an internet connection to load. Everything else works offline.</div>'));
+    return true;
+  }
+
   function afterPoints() {
-    if (!$('#ch-pts-time')) return;
-    if (!C.available()) {
-      $$('.chart-box').forEach((b) => (b.innerHTML = '<div class="chart-fallback">Charts need an internet connection to load. Everything else works offline.</div>'));
-      return;
-    }
+    if (!$('#ch-pts-time') || chartsOffline()) return;
     const P = byId();
-    const stats = Object.values(L.playerStats(state)).filter((s) => s.rounds > 0);
-    C.pointsOverTime($('#ch-pts-time'), state.games, stats.map((s) => s.id), P);
+    const st = cur();
+    const stats = statList(st);
+    C.pointsOverTime($('#ch-pts-time'), st.games, stats.map((s) => s.id), P);
     C.pointsShare($('#ch-pts-share'), stats, P);
   }
 
   /* ----------------------------------------------------------------- TROPHIES */
-  function trophyCounts() {
+  function trophyCounts(st) {
     const held = {};
-    L.trophies(state).forEach((t) => t.holders.forEach((id) => (held[id] = (held[id] || 0) + 1)));
+    L.trophies(st).forEach((t) => t.holders.forEach((id) => (held[id] = (held[id] || 0) + 1)));
     return held;
   }
 
-  function renderTrophies() {
+  const holderNames = (P, ids) => listJoin(ids.map((id) => (P[id] ? P[id].name : 'Someone')));
+
+  function trophyShelf(earned) {
     const P = byId();
-    const all = L.trophies(state);
-    const earned = all.filter((t) => t.holders.length);
-    const locked = all.filter((t) => !t.holders.length);
     const shelf = {};
     earned.forEach((t) => t.holders.forEach((id) => (shelf[id] = shelf[id] || []).push(t)));
-    const shelfRows = Object.entries(shelf)
+    return Object.entries(shelf)
       .sort((a, b) => b[1].length - a[1].length)
       .map(
         ([id, ts], i) =>
           `<div class="shelf-row"><b class="rank-num">${i + 1}</b>${who(P[id])}<span class="shelf-icons" title="${esc(ts.map((t) => t.title).join(', '))}">${ts.map((t) => `<span>${t.icon}</span>`).join('')}</span><strong class="shelf-count">${ts.length}</strong></div>`
       )
       .join('');
-    const names = (ids) => listJoin(ids.map((id) => (P[id] ? P[id].name : 'Someone')));
+  }
+
+  function renderTrophies() {
+    const P = byId();
+    const all = L.trophies(cur());
+    const earned = all.filter((t) => t.holders.length);
+    const locked = all.filter((t) => !t.holders.length);
+    const shelfRows = trophyShelf(earned);
     const card = (t, i) => {
       const p = P[t.holders[0]];
-      const quip = t.holders.length ? t.quip.replace('{name}', names(t.holders)).replace('{value}', t.value) : '';
+      const quip = t.holders.length ? t.quip.replace('{name}', holderNames(P, t.holders)).replace('{value}', t.value) : '';
       return `<article class="trophy-card pc-${esc(p ? p.color : 'ink')} ${t.holders.length ? '' : 'is-locked'}" style="--i:${i}">
         <div class="trophy-medal" aria-hidden="true">${t.holders.length ? t.icon : '🔒'}</div>
         <div class="trophy-body">
           <h3>${esc(t.title)}</h3>
           ${
             t.holders.length
-              ? `<div class="trophy-who">${t.holders.map((id) => avatar(P[id])).join('')}<span>${esc(names(t.holders))}</span><span class="trophy-value">${esc(t.value)}</span></div>
+              ? `<div class="trophy-who">${t.holders.map((id) => avatar(P[id])).join('')}<span>${esc(holderNames(P, t.holders))}</span><span class="trophy-value">${esc(t.value)}</span></div>
                  <p class="trophy-quip">${esc(quip)}</p>`
               : `<div class="trophy-who"><span class="muted">Up for grabs</span></div>`
           }
@@ -1032,11 +1087,120 @@
       </article>`;
     };
     return `
-      <section class="game-head"><div class="game-title"><span class="eyebrow">${earned.length} of ${all.length} trophies handed out</span><h1>Trophy Room</h1>
-        <p class="muted">Glory, shame and everything in between. Trophies move to whoever earns them, after every round.</p></div></section>
-      ${shelfRows ? `<section class="panel"><div class="panel-head"><h2><span class="pip pip-yellow"></span>Trophy shelf</h2><span class="entry-hint">Who’s hoarding the hardware</span></div><div class="shelf">${shelfRows}</div></section>` : ''}
+      <section class="game-head"><div class="game-title"><span class="eyebrow">${esc(monthName(thisMonth()))} · ${earned.length} of ${all.length} trophies handed out</span><h1>Trophy Room</h1>
+        <p class="muted">Glory, shame and everything in between. Trophies move to whoever earns them after every round, and every one of them goes back up for grabs on the 1st of the month.</p></div>
+        <button type="button" class="btn btn-ghost" data-action="go" data-view="history">📅 Past winners</button></section>
+      ${shelfRows ? `<section class="panel"><div class="panel-head"><h2><span class="pip pip-yellow"></span>Trophy shelf</h2><span class="entry-hint">Who’s hoarding the hardware this month</span></div><div class="shelf">${shelfRows}</div></section>` : ''}
       <section class="trophies">${earned.map(card).join('')}</section>
-      ${locked.length ? `<section class="panel"><div class="panel-head"><h2><span class="pip pip-wild"></span>Still up for grabs</h2><span class="entry-hint">${plural(locked.length, 'trophy').replace('trophys', 'trophies')} nobody has earned yet</span></div><div class="trophies">${locked.map(card).join('')}</div></section>` : ''}`;
+      ${locked.length ? `<section class="panel"><div class="panel-head"><h2><span class="pip pip-wild"></span>Still up for grabs</h2><span class="entry-hint">${plural(locked.length, 'trophy').replace('trophys', 'trophies')} nobody has earned this month</span></div><div class="trophies">${locked.map(card).join('')}</div></section>` : ''}`;
+  }
+
+  /* ------------------------------------------------------------------ HISTORY */
+  function potmQuip(P, pom, live) {
+    const s = pom.stats;
+    const r = pom.runnerUp && P[pom.runnerUp];
+    const rs = r && pom.ranked[1];
+    if (pom.shared && r) return `Level on everything with ${r.name}. They’ll have to share the crown.`;
+    if (!r) return live ? 'Unopposed so far. Someone come and stop them.' : 'Nobody else even got on the board.';
+    const gap = s.wins - rs.wins;
+    if (gap === 0) return `${r.name} won as many games, but lost more. Tiebreakers are brutal.`;
+    if (gap === 1) return `${live ? 'Just one win ahead of' : 'Pipped'} ${r.name}${live ? '. Wide open.' : ' by a single game.'}`;
+    if (gap >= 4) return `${gap} wins clear of ${r.name}. ${live ? 'Running away with it.' : 'Not even close.'}`;
+    return `${gap} wins ahead of ${r.name}${live ? ', with time still on the clock.' : '.'}`;
+  }
+
+  function potmCard(st, key) {
+    const P = byId();
+    const live = key === thisMonth();
+    const pom = L.playerOfMonth(st);
+    if (!pom)
+      return `<section class="potm is-empty"><div class="potm-crown" aria-hidden="true">👑</div><div><span class="eyebrow">Player of the Month${live ? ' · so far' : ''}</span><h2>Nobody yet</h2><p class="muted">${live ? 'Win a game this month to take the crown.' : 'No games were won this month.'}</p></div></section>`;
+    const p = P[pom.id];
+    const s = pom.stats;
+    return `<section class="potm pc-${esc(p ? p.color : 'ink')}">
+      <div class="potm-crown" aria-hidden="true">👑</div>
+      ${avatar(p, 'avatar-lg')}
+      <div class="potm-body"><span class="eyebrow">Player of the Month${live ? ' · so far' : ''}${pom.shared && pom.runnerUp ? ' · shared' : ''}</span>
+        <h2>${esc(p ? p.name : '?')}${pom.shared && P[pom.runnerUp] ? ` &amp; ${esc(P[pom.runnerUp].name)}` : ''}</h2>
+        <p class="potm-line"><b>${plural(s.wins, 'win')}</b> · ${plural(s.draws, 'draw')} · ${plural(s.losses, 'loss').replace('losss', 'losses')} · <b>${plural(s.points, 'point')}</b></p>
+        <p class="muted">${esc(potmQuip(P, pom, live))}</p></div>
+    </section>`;
+  }
+
+  function trophyWinners(st) {
+    const P = byId();
+    const earned = L.trophies(st).filter((t) => t.holders.length);
+    if (!earned.length) return '<div class="empty"><p>No trophies handed out.</p></div>';
+    return `<div class="trophy-list">${earned
+      .map(
+        (t) =>
+          `<div class="trophy-row pc-${esc(P[t.holders[0]] ? P[t.holders[0]].color : 'ink')}"><span class="trophy-row-icon" aria-hidden="true">${t.icon}</span><span class="trophy-row-body"><b>${esc(t.title)}</b><span class="muted">${esc(t.value)}</span></span><span class="trophy-row-who">${t.holders.map((id) => avatar(P[id])).join('')}<span>${esc(holderNames(P, t.holders))}</span></span></div>`
+      )
+      .join('')}</div>`;
+  }
+
+  function renderHistory() {
+    if (historyMonth && monthOf(historyMonth).games.length) return renderMonth(historyMonth);
+    historyMonth = null;
+    const P = byId();
+    const now = thisMonth();
+    const cards = L.monthsOf(state)
+      .map((key) => {
+        const st = monthOf(key);
+        const live = key === now;
+        const pom = L.playerOfMonth(st);
+        const p = pom && P[pom.id];
+        const inner = `<span class="eyebrow">${live ? 'This month · in progress' : 'Final results'}</span><h3>${esc(monthName(key))}</h3>
+          <span class="month-champ">${p ? `${avatar(p)}<span><small>Player of the Month${live ? ' so far' : ''}</small><b>${esc(p.name)}</b></span>` : '<span class="muted">No winner yet</span>'}</span>
+          <span class="month-meta">${plural(st.games.length, 'game')} · ${plural(pointsIn(st), 'point')}</span>`;
+        return st.games.length
+          ? `<button type="button" class="month-card ${live ? 'is-live' : ''}" data-action="open-month" data-month="${key}">${inner}</button>`
+          : `<div class="month-card is-live is-empty">${inner}</div>`;
+      })
+      .join('');
+    return `<section class="game-head"><div class="game-title"><span class="eyebrow">Month by month</span><h1>History</h1>
+        <p class="muted">Leaderboards, points and trophies start again from zero every month. Every finished month is kept here with its Player of the Month, final tables, trophy winners and every game played.</p></div></section>
+      <section class="months">${cards}</section>`;
+  }
+
+  function renderMonth(key) {
+    const P = byId();
+    const st = monthOf(key);
+    const live = key === thisMonth();
+    const stats = statList(st);
+    const months = L.monthsOf(state).filter((k) => monthOf(k).games.length);
+    const i = months.indexOf(key);
+    const newer = months[i - 1];
+    const older = months[i + 1];
+    const games = [...st.games].sort((a, b) => (b.finishedAt || b.createdAt) - (a.finishedAt || a.createdAt));
+    const nav = (k, label) => (k ? `<button type="button" class="btn btn-ghost btn-small" data-action="open-month" data-month="${k}">${label}</button>` : '');
+    const final = live ? 'so far' : 'final';
+    return `
+      <button type="button" class="link-btn back-link" data-action="go" data-view="history">← All months</button>
+      <section class="game-head"><div class="game-title"><span class="eyebrow">${live ? 'This month · in progress' : 'Month in review'}</span><h1>${esc(monthName(key))}</h1>
+        <p class="muted">${plural(st.games.length, 'game')} · ${plural(pointsIn(st), 'point')}${live ? ' · the tables reset on the 1st' : ''}</p></div>
+        <div class="btn-row">${nav(older, `← ${esc(monthShort(older || key))}`)}${nav(newer, `${esc(monthShort(newer || key))} →`)}</div></section>
+      ${potmCard(st, key)}
+      <section class="panel"><div class="panel-head"><h2><span class="pip pip-green"></span>Leaderboard <span class="muted h-note">${final}</span></h2><span class="entry-hint">Ranked by wins. Draws count for nobody.</span></div>${stats.length ? leaderboardTable(st, stats) : '<div class="empty"><p>No rounds played.</p></div>'}</section>
+      <section class="panel"><div class="panel-head"><h2><span class="pip pip-yellow"></span>Points table <span class="muted h-note">${final}</span></h2><span class="entry-hint">Every point scored in ${esc(monthShort(key))}</span></div>${stats.length ? pointsTable(stats) : '<div class="empty"><p>No points scored.</p></div>'}</section>
+      <section class="panel"><div class="panel-head"><h2><span class="pip pip-blue"></span>Trophy winners</h2><span class="entry-hint">${live ? 'Holding them right now' : `Who held each trophy when ${esc(monthShort(key))} ended`}</span></div>${trophyWinners(st)}</section>
+      <section class="panel dash-head"><div class="panel-head" style="margin:0"><h2><span class="pip pip-wild"></span>The details</h2><span class="entry-hint">Everything else that happened in ${esc(monthShort(key))}</span></div></section>
+      ${monthTiles(st, stats)}
+      <div class="chart-grid">
+        <section class="panel"><div class="panel-head"><h2><span class="pip pip-red"></span>Wins</h2><span class="entry-hint">Finished games</span></div><div class="chart-box tall"><canvas id="ch-m-wins" role="img" aria-label="Games won per player"></canvas></div></section>
+        <section class="panel"><div class="panel-head"><h2><span class="pip pip-yellow"></span>The long race</h2><span class="entry-hint">Points piling up, game by game</span></div><div class="chart-box tall"><canvas id="ch-m-pts" role="img" aria-label="Cumulative points after each game"></canvas></div></section>
+      </div>
+      <section class="panel"><div class="panel-head"><h2><span class="pip pip-blue"></span>Head to head</h2><span class="entry-hint">How often each row player finished above each column player</span></div>${h2hTable(st, stats)}</section>
+      <section class="panel"><div class="panel-head"><h2><span class="pip pip-red"></span>Every game</h2><span class="entry-hint">${plural(games.length, 'game')}, newest first</span></div><div class="games">${games.map((g) => gameCard(g, P)).join('')}</div></section>`;
+  }
+
+  function afterHistory() {
+    if (!$('#ch-m-wins') || chartsOffline()) return;
+    const P = byId();
+    const st = monthOf(historyMonth);
+    const stats = statList(st);
+    C.wins($('#ch-m-wins'), stats, P);
+    C.pointsOverTime($('#ch-m-pts'), st.games, stats.map((s) => s.id), P);
   }
 
   /* ------------------------------------------------------------- GAME SETTINGS */
@@ -1125,24 +1289,21 @@
       statsGameId = sel.value;
       render();
     });
-    if (!C.available()) {
-      $$('.chart-box').forEach((b) => (b.innerHTML = '<div class="chart-fallback">Charts need an internet connection to load. Everything else works offline.</div>'));
-      return;
-    }
+    if (chartsOffline()) return;
     const P = byId();
     const g = findGame(statsGameId);
     C.race($('#ch-race'), g, P);
     C.bump($('#ch-bump'), g, P);
     C.perRound($('#ch-rounds'), g, P);
     C.share($('#ch-share'), g, P);
-    const stats = Object.values(L.playerStats(state)).filter((x) => x.rounds > 0);
+    const stats = statList(cur());
     C.wins($('#ch-wins'), stats, P);
     C.radar($('#ch-radar'), stats.filter((x) => (compareIds || []).includes(x.id)), P);
   }
 
   /* ------------------------------------------------------------------ PLAYERS */
   function renderPlayers() {
-    const stats = L.playerStats(state);
+    const stats = L.playerStats(cur());
     const cards = [...state.players]
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((p) => {
@@ -1154,7 +1315,7 @@
         </article>`;
       })
       .join('');
-    return `<section class="game-head"><div class="game-title"><span class="eyebrow">${plural(state.players.length, 'player')} saved</span><h1>Players</h1><p class="muted">${canManage() ? 'Friends appear here once they sign in and pick a username. Guests are players without a Claude account.' : 'Everyone who has a seat at this table.'}</p></div></section>
+    return `<section class="game-head"><div class="game-title"><span class="eyebrow">${plural(state.players.length, 'player')} saved</span><h1>Players</h1><p class="muted">${canManage() ? 'Friends appear here once they sign in and pick a username. Guests are players without a Claude account.' : 'Everyone who has a seat at this table.'} Points, wins, draws and losses are for ${esc(monthName(thisMonth()))}.</p></div></section>
       <section class="panel" ${canManage() ? '' : 'hidden'}><form class="add-inline" id="roster-add"><input type="text" id="roster-new" class="text-input" placeholder="Guest name (no Claude account)" maxlength="24" aria-label="Guest player name" autocomplete="off"><button type="submit" class="btn btn-red">Add guest</button></form></section>
       ${state.players.length ? `<section class="roster">${cards}</section>` : ''}`;
   }
@@ -1231,9 +1392,6 @@
   }
 
   /* ------------------------------------------------------------------- misc */
-  function emptyState(icon, title, body, action, label) {
-    return `<section class="panel"><div class="empty"><span class="empty-icon">${icon}</span><h2>${esc(title)}</h2><p>${esc(body)}</p>${action ? `<button type="button" class="btn btn-red" data-action="${action}">${esc(label)}</button>` : ''}</div></section>`;
-  }
 
   function openBackup() {
     const json = JSON.stringify(state, null, 1);
@@ -1460,6 +1618,7 @@
       <button type="button" class="tab c-yellow" data-action="go" data-view="stats"><span class="tab-glyph">★</span>Stats</button>
       <button type="button" class="tab c-wild" data-action="go" data-view="points"><span class="tab-glyph">#</span>Points</button>
       <button type="button" class="tab c-blue" data-action="go" data-view="trophies"><span class="tab-glyph">🏆</span>Trophies</button>
+      <button type="button" class="tab c-purple" data-action="go" data-view="history"><span class="tab-glyph">◷</span>History</button>
       <button type="button" class="tab c-green" data-action="go" data-view="players"><span class="tab-glyph">☺</span>Players</button>
     </nav>
     <div class="top-actions">
@@ -1487,7 +1646,8 @@
 
   function restoreUi() {
     if (!bootUi) return;
-    if (['play', 'stats', 'points', 'trophies', 'players'].includes(bootUi.view)) view = bootUi.view;
+    if (['play', 'stats', 'points', 'trophies', 'history', 'players'].includes(bootUi.view)) view = bootUi.view;
+    if (typeof bootUi.historyMonth === 'string' && /^\d{4}-\d{2}$/.test(bootUi.historyMonth)) historyMonth = bootUi.historyMonth;
     if (bootUi.focus === 'new' || (bootUi.focus && findGame(bootUi.focus))) focus = bootUi.focus;
     if (bootUi.replay) {
       pendingReplay = bootUi.replay;
@@ -1537,6 +1697,7 @@
     go: (el) => {
       view = el.dataset.view;
       if (view === 'play') focus = null;
+      if (view === 'history') historyMonth = null;
       render();
       window.scrollTo({ top: 0, behavior: FX.reduced() ? 'auto' : 'smooth' });
     },
@@ -1544,6 +1705,12 @@
       view = 'play';
       focus = canManage() ? 'new' : null;
       render();
+    },
+    'open-month': (el) => {
+      view = 'history';
+      historyMonth = el.dataset.month;
+      render();
+      window.scrollTo({ top: 0 });
     },
     'go-hub': () => {
       view = 'play';

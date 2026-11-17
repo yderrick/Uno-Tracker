@@ -799,7 +799,60 @@
     return m;
   }
 
+  /* ------------------------------------------------------------------ months
+     Everything resets each month. A game belongs to the month it finished in; games still
+     being played (live or paused) belong to the current month. Nothing is deleted: a past
+     month is just the games that finished in it. */
+  const monthKey = (ts) => {
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  };
+
+  function gameMonth(g, now = Date.now()) {
+    if (g.status !== 'finished') return monthKey(now);
+    const last = g.rounds[g.rounds.length - 1];
+    return monthKey(g.finishedAt || (last && last.at) || g.createdAt || now);
+  }
+
+  /** The same state, holding only the games of one month. */
+  const monthState = (state, key, now = Date.now()) => ({ ...state, games: state.games.filter((g) => gameMonth(g, now) === key) });
+
+  /** Every month with games, newest first. The current month is always listed. */
+  function monthsOf(state, now = Date.now()) {
+    const keys = new Set([monthKey(now), ...state.games.map((g) => gameMonth(g, now))]);
+    return [...keys].sort().reverse();
+  }
+
+  function monthLabel(key, opts = { month: 'long', year: 'numeric' }) {
+    const [y, m] = key.split('-').map(Number);
+    return new Date(y, m - 1, 1).toLocaleDateString(undefined, opts);
+  }
+
+  /** Previous month's key, e.g. 2026-11 -> 2026-10. */
+  function prevMonth(key) {
+    const [y, m] = key.split('-').map(Number);
+    return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`;
+  }
+
+  /** The month's best, in leaderboard order: most wins, then draws, fewest losses, most points. Null until someone wins a game. */
+  function playerOfMonth(state) {
+    const ranked = Object.values(playerStats(state))
+      .filter((s) => s.finished > 0)
+      .sort((a, b) => b.wins - a.wins || b.draws - a.draws || a.losses - b.losses || b.points - a.points);
+    if (!ranked.length || !ranked[0].wins) return null;
+    const [top, next] = ranked;
+    const shared = next && next.wins === top.wins && next.draws === top.draws && next.losses === top.losses && next.points === top.points;
+    return { id: top.id, stats: top, runnerUp: next ? next.id : null, shared: !!shared, ranked };
+  }
+
   return {
+    monthKey,
+    gameMonth,
+    monthState,
+    monthsOf,
+    monthLabel,
+    prevMonth,
+    playerOfMonth,
     higherWins,
     normaliseGame,
     roundWinner,

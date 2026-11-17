@@ -16,11 +16,15 @@ No build step and no install. Open `index.html` in a browser and play.
 
 Along the way, the scoreboard shows each player as an Uno card with their rank and a mood ("🔥 Unstoppable ×3", "👑 Top dog", "🎯 Match point"), and a **play-by-play** feed adds up to four lines of commentary after every round: lead changes, ties, streaks and broken streaks, first wins, match point, runaways, dry spells, milestones and the odd random heckle. "Big" and "close" are judged against your table's usual round scores.
 
-**Stats**: a dashboard for any game (leader, biggest round, lead changes, the race, momentum, points per round, who wins rounds, a stat sheet) and all-time numbers (a leaderboard with wins, draws and losses, wins chart, a Player DNA radar to compare up to four players, head-to-head), plus every past game to reopen or delete.
+**Stats**: a dashboard for any game (leader, biggest round, lead changes, the race, momentum, points per round, who wins rounds, a stat sheet) and this month's numbers (a leaderboard with wins, draws and losses, wins chart, a Player DNA radar to compare up to four players, head-to-head), plus this month's games to reopen or delete.
 
-**Points**: everyone ranked by cumulative points across every game, with the gap to the leader, wins, points per game and per round, best game and best round. A chart shows the points piling up game by game, and a doughnut shows each player's share of every point scored.
+**Points**: everyone ranked by the points they've scored this month, with the gap to the leader, wins, points per game and per round, best game and best round. A chart shows the points piling up game by game, and a doughnut shows each player's share of every point scored.
 
-**Trophies**: a Trophy Room with 48 trophies, from *The Uno-Disputed Champion*, *The Point Bank* and *Serial Winner* to *The Peacekeeper*, *Snooze Button*, *The Bagel* and *Cursed*. Each one moves to whoever earns it after every round, and a trophy shelf shows who's hoarding the hardware. Trophies nobody has earned yet are listed with how to win them.
+**Monthly reset**: every leaderboard, points table, stat and trophy covers one calendar month and starts again from zero on the 1st. Nothing is deleted: a game belongs to the month it finished in, and games still being played (live or paused) count towards the current month until they end. Players stay saved from month to month.
+
+**History**: every month gets its own page. It opens with the **Player of the Month** (most wins, then draws, fewest losses, most points), then the final leaderboard, the final points table and who held each trophy when the month ended, followed by the month's charts, head-to-head and every game played. The Tables page links to last month's Player of the Month.
+
+**Trophies**: a monthly Trophy Room with 48 trophies, from *The Uno-Disputed Champion*, *The Point Bank* and *Serial Winner* to *The Peacekeeper*, *Snooze Button*, *The Bagel* and *Cursed*. Each one moves to whoever earns it after every round, and a trophy shelf shows who's hoarding the hardware. Trophies nobody has earned yet this month are listed with how to win them.
 
 ## Saving and sharing scores
 
